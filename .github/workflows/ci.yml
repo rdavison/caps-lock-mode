@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Builds the library and the binary, and runs the `#guard` suites in
+      # Tests/Basic.lean and Tests/Quartz.lean, since Tests is a default target.
+      - uses: leanprover/lean-action@v1
+        with:
+          use-mathlib-cache: true
+      - name: End-to-end test of the binary
+        run: ./scripts/selftest.sh
+      - name: The same, over the macOS wire
+        run: ./scripts/selftest-quartz.sh
+      - name: The theorems have no holes
+        run: ./scripts/check-axioms.sh
+      # The formula is only ever edited here, so a syntax error would not show
+      # up until release day.
+      - name: The Homebrew formula parses
+        run: ruby -c packaging/homebrew/capslockmode.rb
