@@ -28,6 +28,10 @@ It is written in Lean 4 with Mathlib, which is the other half of the point: the
 properties that make a keyboard layer safe to leave running all day are
 *proved*, not tested. See [What is proved](#what-is-proved).
 
+Two platforms are supported, and they are genuinely different: `dd` on a Mac is
+`Cmd+Left, Shift+Down, Delete`, because `Home` does nothing useful in a Mac text
+field. See [Platforms and backends](#platforms-and-backends).
+
 ## Build
 
 Needs [elan](https://github.com/leanprover/elan) (the Lean toolchain manager).
@@ -42,9 +46,14 @@ lake build              # builds the library, the binary, and runs the tests
 suite; a failing test is a failing build.
 
 ```sh
-./scripts/selftest.sh       # end-to-end check of the binary over its wire protocol
-./scripts/check-axioms.sh   # confirm no theorem leans on a `sorry`
+./scripts/selftest.sh         # end-to-end check of the binary over its wire protocol
+./scripts/selftest-quartz.sh  # the same, over the macOS wire
+./scripts/check-axioms.sh     # confirm no theorem leans on a `sorry`
 ```
+
+The macOS driver (`drivers/quartz_bridge.swift`) has **not been run on real
+hardware**: it is written against the documented CoreGraphics API, and the Lean
+side it talks to is tested, but expect to fix something the first time.
 
 ## Try it without touching your keyboard
 
@@ -75,6 +84,28 @@ A       insert        A
 T       insert        T
 esc     normal
 ```
+
+## Install on macOS
+
+```sh
+brew install rdavison/capslockmode/capslockmode
+brew services start capslockmode        # not with sudo: an event tap needs your GUI session
+```
+
+Then add `capslockmode-quartz` under **System Settings → Privacy & Security →
+Accessibility**; the service polls for the permission, so ticking the box is
+enough, with no restart. `capslockmode-quartz --check` prints the status and the
+exact path to add.
+
+Two things to know:
+
+* The binary is **ad-hoc signed**, so macOS treats each upgrade as a different
+  program: after `brew upgrade` you have to remove the Accessibility entry and
+  add it back. A Developer ID would fix that; there isn't one yet.
+* **Caps Lock cannot be swallowed by an event tap** — the lock state and the LED
+  live below it in IOKit — so the service remaps Caps Lock to F18 with `hidutil`
+  while it runs and uses F18 as the toggle. `brew services stop` puts it back.
+  Pass `--no-remap` to bind something else.
 
 ## Wire it to a real keyboard
 
@@ -110,6 +141,48 @@ down del
 up del
 ```
 
+## Platforms and backends
+
+The key map is written in *intents* — "next word", "copy", "start of line" — and
+a `Platform` lowers each one to a chord. The same `dd` compiles differently:
+
+| Command | PC | macOS |
+| --- | --- | --- |
+| `w` | `Ctrl+Right` | `Option+Right` |
+| `0` / `$` | `Home` / `End` | `Cmd+Left` / `Cmd+Right` |
+| `yy` | `Home Shift+Down Ctrl+C Home` | `Cmd+Left Shift+Down Cmd+C Cmd+Left` |
+| `u` / `Ctrl+R` | `Ctrl+Z` / `Ctrl+Y` | `Cmd+Z` / `Cmd+Shift+Z` |
+| `n` | `F3` | `Cmd+G` |
+
+`capslockmode keys --platform mac` prints the whole table.
+
+The two backends also disagree about what an event *is*, which is the more
+interesting half:
+
+| | Linux evdev | macOS Quartz |
+| --- | --- | --- |
+| Modifiers | their own press/release events | a flags bitmask on each event |
+| A chord costs | up to 10 events | exactly 2 (`Quartz.encode_length`) |
+| Modifier state arrives as | transitions | whole masks, diffed by the client |
+| What keeps it honest | `Balanced`: the kernel drops unmatched releases | `flags_settle`: the flag state must return to empty |
+| Loop risk | none: uinput is a separate device | the tap sees its own posts (`no_feedback`) |
+
+`--wire quartz` makes `run` speak virtual keycodes and flag masks, so the macOS
+driver needs no key table of its own:
+
+```
+$ capslockmode run --wire quartz --platform mac
+down 57            ← Caps Lock (kVK_CapsLock)
+down 2             ← `d`
+down 2             ← `d` again
+key down 123 command     ← Cmd+Left
+key up 123 command
+key down 125 shift       ← Shift+Down
+key up 125 shift
+key down 117 -           ← Delete
+key up 117 -
+```
+
 ## Key map
 
 Motions `h j k l w b e 0 ^ $ { } gg G <C-f> <C-b>`, with counts (`3j`, `d2w`).
@@ -140,6 +213,10 @@ The proofs live in [`CapslockMode/Balance.lean`](CapslockMode/Balance.lean) and
 | `step_count_le`, `command_repeats_le` | A count is clamped to `maxCount` and no key press repeats its keystrokes more than that, so a slipped `99999dd` cannot become a storm of synthetic events. |
 | `Chord.emit_length_le` | A chord is at most ten events, which together with the above bounds the work one key press can cause. |
 | `operator_progress`, `textObj_progress` | A half-typed command always resolves: `d` can wait for a motion or upgrade to `diw`, but it can never keep swallowing keys. |
+| `no_feedback` | An event CapslockMode injected itself is passed straight through, never re-read as a command. macOS event taps and Windows hooks both observe their own output, so without this one `dd` could cascade. |
+| `Quartz.encode_chord`, `Quartz.encode_length` | On macOS a chord is exactly two events, with the modifiers riding along as flags rather than being pressed and released. |
+| `Quartz.flags_settle` | Because the evdev-shaped stream is balanced, the macOS flag state returns to empty after every chord: no command can leave Command set for the next one. |
+| `Quartz.chordsOf_encode` | Nothing is lost in translation — a reader of the Quartz stream recovers exactly the chords CapslockMode meant. |
 
 The `Balanced` predicate is the interesting definition. For a physical key `k`,
 `net k` counts presses minus releases; a stream is balanced when every prefix
@@ -174,6 +251,10 @@ approximations. These are deliberate, and documented here rather than hidden:
   `Shift+Down` has nowhere to go.
 * **No registers, marks, macros or `:` commands.** There is nowhere to put
   them: CapslockMode does not own the text.
+* **On macOS, holding a key does not repeat it.** The event tap swallows the
+  original event and re-posts a replacement, and a posted event does not
+  auto-repeat. Fixing it means answering inside the tap callback, against the
+  tap's deadline.
 
 ## Layout
 
@@ -182,19 +263,27 @@ CapslockMode/Key.lean         keys, chords, events, and how a chord is played
 CapslockMode/Machine.lean     the modal machine: modes, counts, operators, `step`
 CapslockMode/Balance.lean     "no stuck keys", defined and proved for chords
 CapslockMode/Invariants.lean  the promises the README makes, as theorems
-CapslockMode/Protocol.lean    the wire format and vim key notation
+CapslockMode/Platform.lean    intents, and the PC and macOS keystrokes for them
+CapslockMode/Backend/Quartz.lean  the macOS event model: flags, keycodes, proofs
+CapslockMode/Protocol.lean    the two wire formats and vim key notation
 CapslockMode/Screen.lean      a model text field, used by the demo and the tests
 CapslockMode/Prelude.lean     the slice of Mathlib this project depends on
 Main.lean                     run / demo / trace / keys
 Tests/Basic.lean              behavioural tests, checked by `lake build`
+Tests/Quartz.lean             every chord the key map plays is nameable to macOS
 drivers/evdev_bridge.py       Linux keyboard driver (evdev in, uinput out)
+drivers/quartz_bridge.swift   macOS keyboard driver (event tap in, CGEventPost out)
+packaging/homebrew/           the formula, published to the tap on release
 scripts/selftest.sh           end-to-end test of the binary
+scripts/selftest-quartz.sh    the same, over the macOS wire
 scripts/check-axioms.sh       confirms the theorems have no holes
 ```
 
 ## Configuration
 
 ```
+--platform <name>   keystrokes to compile commands into: pc (default) or mac
+--wire <name>       protocol spoken by `run`: raw (default) or quartz
 --toggle <key>      key that switches modes (default: caps)
 --max-count <n>     largest accepted count prefix (default: 100)
 --start-normal      start in normal mode

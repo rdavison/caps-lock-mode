@@ -17,4 +17,3 @@ globs = ["Tests.+"]
 [[lean_exe]]
 name = "capslockmode"
 root = "Main"
-supportInterpreter = true

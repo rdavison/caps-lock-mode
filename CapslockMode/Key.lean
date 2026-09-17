@@ -102,6 +102,10 @@ structure InputEvent where
   dir : Dir
   key : PhysKey
   mods : Mods := {}
+  /-- Set when this event is one CapslockMode itself injected.  Some platforms
+  (macOS event taps, Windows low-level hooks) show a filter its own synthetic
+  events, and re-interpreting them would feed the machine its own output. -/
+  injected : Bool := false
   deriving DecidableEq, Repr, Inhabited
 
 /-- An event CapslockMode hands back to the system. -/

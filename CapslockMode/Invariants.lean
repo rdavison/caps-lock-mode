@@ -31,9 +31,9 @@ theorem Response.emit_balanced (r : Response) : Balanced r.emit :=
 command key arrives, everything it synthesises is balanced: modifiers it
 presses, it releases, and it never presses one that is already down. -/
 theorem step_balanced (cfg : Config) (st : State) (ev : InputEvent)
-    (hm : st.mode.isInsert = false) (hdir : ev.dir = .down)
+    (hm : st.mode.isInsert = false) (hdir : ev.dir = .down) (hinj : ev.injected = false)
     (ht : (ev.key == cfg.toggleKey) = false) : Balanced (step cfg st ev).2 := by
-  rw [step, hdir]
+  rw [step, if_neg (by simp [hinj]), hdir]
   simp only [ht, Bool.false_eq_true, if_false, hm]
   split
   · exact balanced_nil
@@ -43,20 +43,20 @@ theorem step_balanced (cfg : Config) (st : State) (ev : InputEvent)
 CapslockMode forwarded; everything else is swallowed.  Applications therefore
 never see a release for a key they never saw pressed. -/
 theorem up_only_if_pressed (cfg : Config) (st : State) (ev : InputEvent)
-    (hdir : ev.dir = .up) (hn : ev.key ∉ st.down) :
+    (hdir : ev.dir = .up) (hinj : ev.injected = false) (hn : ev.key ∉ st.down) :
     (step cfg st ev).2 = [] := by
-  rw [step, hdir]
+  rw [step, if_neg (by simp [hinj]), hdir]
   simp [hn]
 
 /-- **No stuck keys, the other half.**  A press that is forwarded is recorded,
 so its release will be forwarded too — even if Caps Lock is pressed in
 between. -/
 theorem down_remembered (cfg : Config) (st : State) (ev : InputEvent)
-    (hdir : ev.dir = .down) (hm : st.mode.isInsert = true)
+    (hdir : ev.dir = .down) (hinj : ev.injected = false) (hm : st.mode.isInsert = true)
     (ht : (ev.key == cfg.toggleKey) = false)
     (he : (cfg.escapeToNormal && ev.key == PhysKey.key .esc) = false) :
     ev.key ∈ (step cfg st ev).1.down := by
-  rw [step, hdir]
+  rw [step, if_neg (by simp [hinj]), hdir]
   simp only [ht, Bool.false_eq_true, if_false, hm, if_true, he, State.press]
   split
   · next h => simpa using h
@@ -65,7 +65,7 @@ theorem down_remembered (cfg : Config) (st : State) (ev : InputEvent)
 /-- Balance is preserved across a whole session, so a long run of commands
 cannot accumulate a stuck modifier either. -/
 theorem run_balanced (cfg : Config) (st : State) (evs : List InputEvent)
-    (hdir : ∀ ev ∈ evs, ev.dir = .down)
+    (hdir : ∀ ev ∈ evs, ev.dir = .down) (hinj : ∀ ev ∈ evs, ev.injected = false)
     (ht : ∀ ev ∈ evs, (ev.key == cfg.toggleKey) = false)
     (h : ∀ st' ev, st'.mode.isInsert = false → (step cfg st' ev).1.mode.isInsert = false)
     (h₀ : st.mode.isInsert = false) : Balanced (run cfg st evs).2 := by
@@ -73,8 +73,18 @@ theorem run_balanced (cfg : Config) (st : State) (evs : List InputEvent)
   | nil => exact balanced_nil
   | cons ev evs ih =>
     rw [run]
-    refine (step_balanced cfg st ev h₀ (hdir ev (by simp)) (ht ev (by simp))).append ?_
-    exact ih _ (fun e he => hdir e (by simp [he])) (fun e he => ht e (by simp [he])) (h st ev h₀)
+    refine (step_balanced cfg st ev h₀ (hdir ev (by simp)) (hinj ev (by simp))
+      (ht ev (by simp))).append ?_
+    exact ih _ (fun e he => hdir e (by simp [he])) (fun e he => hinj e (by simp [he]))
+      (fun e he => ht e (by simp [he])) (h st ev h₀)
+
+/-- **No feedback loop.**  An event CapslockMode injected itself is passed
+straight through: it never re-enters the machine as a command.  On macOS and
+Windows the filter genuinely observes its own output, so without this a single
+`dd` could cascade. -/
+theorem no_feedback (cfg : Config) (st : State) (ev : InputEvent) (h : ev.injected = true) :
+    step cfg st ev = (st, [ev.passthrough]) := by
+  rw [step, if_pos (by simp [h])]
 
 /-! ## Insert mode is transparent
 
@@ -83,30 +93,31 @@ is switched off: nothing whatsoever. -/
 
 /-- In insert mode every key press is passed through unchanged. -/
 theorem step_insert (cfg : Config) (st : State) (ev : InputEvent)
-    (hdir : ev.dir = .down)
+    (hdir : ev.dir = .down) (hinj : ev.injected = false)
     (hm : st.mode.isInsert = true)
     (htoggle : (ev.key == cfg.toggleKey) = false)
     (hesc : (cfg.escapeToNormal && ev.key == PhysKey.key .esc) = false) :
     step cfg st ev = (st.press ev.key, [ev.passthrough]) := by
-  rw [step, hdir]
+  rw [step, if_neg (by simp [hinj]), hdir]
   simp only [htoggle, Bool.false_eq_true, if_false, hm, if_true, hesc]
 
 /-- ... and therefore a whole stream is passed through unchanged. -/
 theorem run_insert_transparent (cfg : Config) (st : State) (evs : List InputEvent)
     (hm : st.mode.isInsert = true)
-    (hdir : ∀ ev ∈ evs, ev.dir = .down)
+    (hdir : ∀ ev ∈ evs, ev.dir = .down) (hinj : ∀ ev ∈ evs, ev.injected = false)
     (htoggle : ∀ ev ∈ evs, (ev.key == cfg.toggleKey) = false)
     (hesc : ∀ ev ∈ evs, (cfg.escapeToNormal && ev.key == PhysKey.key .esc) = false) :
     (run cfg st evs).2 = evs.map InputEvent.passthrough := by
   induction evs generalizing st with
   | nil => rfl
   | cons ev evs ih =>
-    have hstep := step_insert cfg st ev (hdir ev (by simp)) hm (htoggle ev (by simp))
-      (hesc ev (by simp))
+    have hstep := step_insert cfg st ev (hdir ev (by simp)) (hinj ev (by simp)) hm
+      (htoggle ev (by simp)) (hesc ev (by simp))
     have hmode : (st.press ev.key).mode.isInsert = true := by
       unfold State.press; split <;> exact hm
     have hrest := ih (st.press ev.key) hmode (fun e he => hdir e (by simp [he]))
-      (fun e he => htoggle e (by simp [he])) (fun e he => hesc e (by simp [he]))
+      (fun e he => hinj e (by simp [he])) (fun e he => htoggle e (by simp [he]))
+      (fun e he => hesc e (by simp [he]))
     simp [run, hstep, hrest]
 
 /-! ## Caps Lock -/
@@ -199,12 +210,12 @@ of synthetic events. -/
     (linewise cfg st op n).state.count = 0 := by
   unfold linewise; split <;> rfl
 
-@[simp] theorem applyOver_count (st : State) (op : Operator) (b bd : List Chord) (r : Nat) :
-    (applyOver st op b bd r).state.count = 0 := by
+@[simp] theorem applyOver_count (p : Platform) (st : State) (op : Operator) (b bd : List Chord)
+    (r : Nat) : (applyOver p st op b bd r).state.count = 0 := by
   unfold applyOver; split_ifs <;> rfl
 
-theorem gotoLine_count (e f : Bool) (st : State) (n : Nat) :
-    (gotoLine e f st n).state.count ≤ st.count := by
+theorem gotoLine_count (p : Platform) (e f : Bool) (st : State) (n : Nat) :
+    (gotoLine p e f st n).state.count ≤ st.count := by
   unfold gotoLine
   split_ifs <;> simp [State.toNormal, State.waiting]
 
@@ -214,11 +225,11 @@ theorem gotoLine_count (e f : Bool) (st : State) (n : Nat) :
 /-- The count never exceeds `maxCount`, however many digits you type. -/
 theorem command_count_le (cfg : Config) (st : State) (c : Chord) (h : st.count ≤ cfg.maxCount) :
     (command cfg st c).state.count ≤ cfg.maxCount := by
-  have hgoto : ∀ e f n, (gotoLine e f st n).state.count ≤ cfg.maxCount := fun e f n =>
-    le_trans (gotoLine_count e f st n) h
+  have hgoto : ∀ p e f n, (gotoLine p e f st n).state.count ≤ cfg.maxCount := fun p e f n =>
+    le_trans (gotoLine_count p e f st n) h
   unfold command replaceCmd gCmd textObjCmd operatorCmd visualCmd normalCmd
   repeat' split
-  all_goals try exact hgoto _ _ _
+  all_goals try exact hgoto _ _ _ _
   all_goals try exact h
   all_goals try split_ifs
   all_goals try simp [State.toNormal, State.toInsert, State.toVisual, State.waiting, Config.clamp]
@@ -248,14 +259,14 @@ theorem Response.chords_length (r : Response) :
 what stops a slipped `99999dd` from becoming a storm of synthetic events. -/
 theorem command_repeats_le (cfg : Config) (st : State) (c : Chord) (h : st.count ≤ cfg.maxCount) :
     (command cfg st c).repeats ≤ max cfg.maxCount 1 := by
-  have hgoto : ∀ e f, (gotoLine e f st st.count).repeats ≤ max cfg.maxCount 1 := by
-    intro e f
+  have hgoto : ∀ p e f, (gotoLine p e f st st.count).repeats ≤ max cfg.maxCount 1 := by
+    intro p e f
     unfold gotoLine
     split_ifs <;> simp <;> omega
   unfold command replaceCmd gCmd textObjCmd operatorCmd visualCmd normalCmd linewise applyOver
     Config.clamp
   repeat' split
-  all_goals try exact hgoto _ _
+  all_goals try exact hgoto _ _ _
   all_goals try split_ifs
   all_goals try simp [Config.clamp]
   all_goals try (split <;> simp [Config.clamp])
@@ -264,11 +275,11 @@ theorem command_repeats_le (cfg : Config) (st : State) (c : Chord) (h : st.count
 /-- Together with `Chord.emit_length_le`, that bounds the work one key press can
 cause: at most `10 * (before + maxCount * body + after)` events. -/
 theorem step_emit_length_le (cfg : Config) (st : State) (ev : InputEvent) (c : Chord)
-    (hd : ev.dir = .down) (hc : ev.chord? = some c) (hi : st.mode.isInsert = false)
-    (ht : (ev.key == cfg.toggleKey) = false) :
+    (hd : ev.dir = .down) (hinj : ev.injected = false) (hc : ev.chord? = some c)
+    (hi : st.mode.isInsert = false) (ht : (ev.key == cfg.toggleKey) = false) :
     (step cfg st ev).2.length ≤ 10 * (command cfg st c).chords.length := by
   have : (step cfg st ev).2 = emitChords (command cfg st c).chords := by
-    simp [step, ht, hi, hd, hc, Response.emit]
+    simp [step, ht, hi, hd, hc, hinj, Response.emit]
   rw [this]
   induction (command cfg st c).chords with
   | nil => simp [emitChords]
@@ -280,6 +291,14 @@ theorem step_emit_length_le (cfg : Config) (st : State) (ev : InputEvent) (c : C
     omega
 
 /-! ## Half-typed commands always resolve -/
+
+@[simp] theorem applyOver_pending (p : Platform) (st : State) (op : Operator) (b bd : List Chord)
+    (r : Nat) : (applyOver p st op b bd r).state.pending = .idle := by
+  unfold applyOver; split_ifs <;> rfl
+
+@[simp] theorem linewise_pending (cfg : Config) (st : State) (op : Operator) (n : Nat) :
+    (linewise cfg st op n).state.pending = .idle := by
+  unfold linewise; split <;> rfl
 
 /-- The digits, as the count parser sees them. -/
 def Chord.isDigit (c : Chord) : Bool :=
@@ -311,11 +330,15 @@ theorem operator_progress (cfg : Config) (st : State) (op : Operator) (n : Nat) 
   split
   · exact Or.inl rfl
   · rw [countDigit?_eq_none hd]
-    unfold operatorCmd linewise applyOver
+    unfold operatorCmd
     repeat' split
     all_goals try contradiction
     all_goals try exact Or.inl rfl
     all_goals try exact Or.inr ⟨_, _, _, rfl⟩
+    -- both arms of the `match motion ...` settle the pending command
+    all_goals try
+      (cases hmotion : motion cfg.platform true c <;>
+        simp [hmotion, State.toNormal, State.toInsert, State.waiting])
     all_goals try simp [State.toNormal, State.toInsert, State.waiting]
 
 /-- A text object resolves immediately. -/
@@ -327,7 +350,7 @@ theorem textObj_progress (cfg : Config) (st : State) (op : Operator) (n : Nat) (
   split
   · rfl
   · rw [countDigit?_eq_none hd]
-    unfold textObjCmd applyOver
+    unfold textObjCmd
     repeat' split
     all_goals try contradiction
     all_goals try rfl

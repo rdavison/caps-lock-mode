@@ -10,6 +10,9 @@ theorems=(
   step_insert capsLock_twice SettledMode.toggle_involutive esc_resets
   step_count_le command_repeats_le operator_progress textObj_progress
   Chord.emit_balanced emitChords_balanced Chord.emit_length_le
+  no_feedback
+  Quartz.encode_chord Quartz.encode_length Quartz.flags_settle Quartz.chordsOf_encode
+  Quartz.decode_key
 )
 
 tmp=$(mktemp -d)

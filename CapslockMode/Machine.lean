@@ -13,6 +13,7 @@ essentially every text widget already understands (`Home`, `Shift+Down`,
 without knowing anything about them.
 -/
 import CapslockMode.Key
+import CapslockMode.Platform
 
 namespace CapslockMode
 
@@ -61,12 +62,12 @@ inductive Operator where
 namespace Operator
 
 /-- The keystrokes that perform the operator once a selection exists. -/
-def apply : Operator → List Chord
-  | .delete => [Chord.plain .delete]
-  | .change => [Chord.plain .delete]
-  | .yank => [Chord.ctrled false (.char 'c')]
-  | .indent => [Chord.plain .tab]
-  | .outdent => [Chord.shifted true .tab]
+def apply (p : Platform) : Operator → List Chord
+  | .delete => [p.chord false .deleteForward]
+  | .change => [p.chord false .deleteForward]
+  | .yank => [p.chord false .copy]
+  | .indent => [p.chord false .indent]
+  | .outdent => [p.chord false .outdent]
 
 /-- `c` drops you into insert mode when it is done. -/
 def entersInsert : Operator → Bool
@@ -161,6 +162,8 @@ structure Config where
   escapeToNormal : Bool := true
   /-- Mode to start in. -/
   startMode : Mode := .insert
+  /-- Which keyboard conventions to compile commands into. -/
+  platform : Platform := .pc
   /-- Upper bound on any count, so that a fat-fingered `99999dd` cannot flood
   the system with synthetic events.  Proved to be respected in
   `CapslockMode.Invariants`. -/
@@ -212,42 +215,44 @@ end Response
 /-! ## The key map -/
 
 /-- Selecting one line, ready for a linewise operator. -/
-def lineDown : Chord := Chord.shifted true .down
+def lineDown (p : Platform) : Chord := p.chord true .lineDown
 
 /-- Motions.  `extend` is set when the motion should drag a selection with it,
 which is how operators (`dw`) and visual mode both work. -/
-def motion (extend : Bool) (c : Chord) : Option (List Chord) :=
+def motion (p : Platform) (extend : Bool) (c : Chord) : Option (List Chord) :=
+  let go (i : Intent) : Option (List Chord) := some [p.chord extend i]
   if c.mods.ctrl then
     match c.key with
-    | .char 'f' | .char 'd' => some [Chord.shifted extend .pageDown]
-    | .char 'b' | .char 'u' => some [Chord.shifted extend .pageUp]
+    | .char 'f' | .char 'd' => go .pageDown
+    | .char 'b' | .char 'u' => go .pageUp
     | _ => none
   else if c.mods.alt || c.mods.super then none
   else
     match c.key with
-    | .char 'h' | .left => some [Chord.shifted extend .left]
-    | .char 'l' | .right | .space => some [Chord.shifted extend .right]
-    | .char 'j' | .down | .enter => some [Chord.shifted extend .down]
-    | .char 'k' | .up => some [Chord.shifted extend .up]
-    | .char 'w' | .char 'W' | .char 'e' | .char 'E' => some [Chord.ctrled extend .right]
-    | .char 'b' | .char 'B' => some [Chord.ctrled extend .left]
-    | .char '0' | .home => some [Chord.shifted extend .home]
-    | .char '^' => some [Chord.shifted extend .home]
-    | .char '$' | .«end» => some [Chord.shifted extend .«end»]
-    | .char '{' => some [Chord.ctrled extend .up]
-    | .char '}' => some [Chord.ctrled extend .down]
-    | .pageUp => some [Chord.shifted extend .pageUp]
-    | .pageDown => some [Chord.shifted extend .pageDown]
+    | .char 'h' | .left => go .charLeft
+    | .char 'l' | .right | .space => go .charRight
+    | .char 'j' | .down | .enter => go .lineDown
+    | .char 'k' | .up => go .lineUp
+    | .char 'w' | .char 'W' | .char 'e' | .char 'E' => go .wordRight
+    | .char 'b' | .char 'B' => go .wordLeft
+    | .char '0' | .home => go .lineStart
+    | .char '^' => go .lineStart
+    | .char '$' | .«end» => go .lineEnd
+    | .char '{' => go .paraUp
+    | .char '}' => go .paraDown
+    | .pageUp => go .pageUp
+    | .pageDown => go .pageDown
     | _ => none
 
 /-- `gg` / `G`, which take a line number rather than a repeat count. -/
-def gotoLine (extend : Bool) (fromTop : Bool) (st : State) (count : Nat) : Response :=
+def gotoLine (p : Platform) (extend : Bool) (fromTop : Bool) (st : State) (count : Nat) :
+    Response :=
   if count == 0 then
-    { before := [if fromTop then Chord.ctrled extend .home else Chord.ctrled extend .«end»]
+    { before := [p.chord extend (if fromTop then .docStart else .docEnd)]
       state := if st.mode.isVisual then st else st.toNormal }
   else
-    { before := [Chord.ctrled extend .home]
-      body := [Chord.shifted extend .down]
+    { before := [p.chord extend .docStart]
+      body := [p.chord extend .lineDown]
       repeats := count - 1
       state := if st.mode.isVisual then st.waiting .idle else st.toNormal }
 
@@ -263,59 +268,62 @@ def countDigit? (st : State) (c : Chord) : Option Nat :=
 
 /-- Linewise form of an operator: `dd`, `cc`, `yy`, `>>`, `<<`. -/
 def linewise (cfg : Config) (st : State) (op : Operator) (n : Nat) : Response :=
+  let p := cfg.platform
   let n := cfg.clamp (normCount n)
   let ins := op.entersInsert
   match op with
   | .change =>
       -- select the text of the lines but not the final newline, so `cc` keeps
       -- the line and lets you retype it
-      { before := [Chord.plain .home]
-        body := [lineDown]
+      { before := [p.chord false .lineStart]
+        body := [lineDown p]
         repeats := n - 1
-        after := [Chord.shifted true .«end», Chord.plain .delete]
+        after := [p.chord true .lineEnd, p.chord false .deleteForward]
         state := st.toInsert }
   | .yank =>
       -- copy, then collapse the selection on to the next line, which is where
       -- `p` should paste
-      { before := [Chord.plain .home]
-        body := [lineDown]
+      { before := [p.chord false .lineStart]
+        body := [lineDown p]
         repeats := n
-        after := op.apply ++ [Chord.plain .home]
+        after := op.apply p ++ [p.chord false .lineStart]
         state := st.toNormal }
   | .indent | .outdent =>
       -- a selection that reaches into the next line would indent it too
-      { before := [Chord.plain .home]
-        body := [lineDown]
+      { before := [p.chord false .lineStart]
+        body := [lineDown p]
         repeats := n - 1
-        after := op.apply
+        after := op.apply p
         records := true
         state := st.toNormal }
   | _ =>
-      { before := [Chord.plain .home]
-        body := [lineDown]
+      { before := [p.chord false .lineStart]
+        body := [lineDown p]
         repeats := n
-        after := op.apply
+        after := op.apply p
         records := !ins && op != .yank
         state := st.toNormal }
 
 /-- An operator applied to a selection made by `sel`. -/
-def applyOver (st : State) (op : Operator) (before body : List Chord) (repeats : Nat) : Response :=
+def applyOver (p : Platform) (st : State) (op : Operator) (before body : List Chord)
+    (repeats : Nat) : Response :=
   { before := before
     body := body
     repeats := repeats
     -- a charwise yank leaves the cursor at the start of the copied text, as vi does
-    after := op.apply ++ (if op == .yank then [Chord.plain .left] else [])
+    after := op.apply p ++ (if op == .yank then [p.chord false .charLeft] else [])
     records := !op.entersInsert && op != .yank
     state := if op.entersInsert then st.toInsert else st.toNormal }
 
 /-- Normal mode: the key is a command. -/
 def normalCmd (cfg : Config) (st : State) (c : Chord) : Response :=
+  let p := cfg.platform
   let n := cfg.clamp (normCount st.count)
   if c.mods.ctrl then
     match c.key with
-    | .char 'r' => { body := [Chord.ctrled false (.char 'y')], repeats := n, state := st.toNormal }
-    | .char 'f' | .char 'd' => { body := [Chord.plain .pageDown], repeats := n, state := st.toNormal }
-    | .char 'b' | .char 'u' => { body := [Chord.plain .pageUp], repeats := n, state := st.toNormal }
+    | .char 'r' => { body := [p.chord false .redo], repeats := n, state := st.toNormal }
+    | .char 'f' | .char 'd' => { body := [p.chord false .pageDown], repeats := n, state := st.toNormal }
+    | .char 'b' | .char 'u' => { body := [p.chord false .pageUp], repeats := n, state := st.toNormal }
     | .char 'v' => { state := st.toVisual false }
     | _ => { before := [c], state := st.toNormal }
   else if c.mods.alt || c.mods.super then
@@ -324,38 +332,43 @@ def normalCmd (cfg : Config) (st : State) (c : Chord) : Response :=
     match c.key with
     -- entering insert mode
     | .char 'i' => { state := st.toInsert }
-    | .char 'I' => { before := [Chord.plain .home], state := st.toInsert }
-    | .char 'a' => { before := [Chord.plain .right], state := st.toInsert }
-    | .char 'A' => { before := [Chord.plain .«end»], state := st.toInsert }
-    | .char 'o' => { before := [Chord.plain .«end», Chord.plain .enter], state := st.toInsert }
-    | .char 'O' => { before := [Chord.plain .home, Chord.plain .enter, Chord.plain .up]
+    | .char 'I' => { before := [p.chord false .lineStart], state := st.toInsert }
+    | .char 'a' => { before := [p.chord false .charRight], state := st.toInsert }
+    | .char 'A' => { before := [p.chord false .lineEnd], state := st.toInsert }
+    | .char 'o' => { before := [p.chord false .lineEnd, p.chord false .newline], state := st.toInsert }
+    | .char 'O' => { before := [p.chord false .lineStart, p.chord false .newline, p.chord false .lineUp]
                      state := st.toInsert }
-    | .char 's' => { body := [Chord.plain .delete], repeats := n, state := st.toInsert }
+    | .char 's' => { body := [p.chord false .deleteForward], repeats := n, state := st.toInsert }
     | .char 'S' => linewise cfg st .change st.count
-    | .char 'C' => { before := [Chord.shifted true .«end», Chord.plain .delete], state := st.toInsert }
+    | .char 'C' => { before := [p.chord true .lineEnd, p.chord false .deleteForward]
+                     state := st.toInsert }
     -- edits that stay in normal mode
-    | .char 'x' => { body := [Chord.plain .delete], repeats := n, records := true, state := st.toNormal }
-    | .char 'X' => { body := [Chord.plain .backspace], repeats := n, records := true, state := st.toNormal }
-    | .delete => { body := [Chord.plain .delete], repeats := n, records := true, state := st.toNormal }
-    | .backspace => { body := [Chord.shifted false .left], repeats := n, state := st.toNormal }
-    | .char 'D' => { before := [Chord.shifted true .«end», Chord.plain .delete], records := true
+    | .char 'x' => { body := [p.chord false .deleteForward], repeats := n, records := true
+                     state := st.toNormal }
+    | .char 'X' => { body := [p.chord false .deleteBack], repeats := n, records := true
+                     state := st.toNormal }
+    | .delete => { body := [p.chord false .deleteForward], repeats := n, records := true
+                   state := st.toNormal }
+    | .backspace => { body := [p.chord false .charLeft], repeats := n, state := st.toNormal }
+    | .char 'D' => { before := [p.chord true .lineEnd, p.chord false .deleteForward], records := true
                      state := st.toNormal }
     | .char 'Y' => linewise cfg st .yank st.count
-    | .char 'J' => { body := [Chord.plain .«end», Chord.plain .delete], repeats := n, records := true
+    | .char 'J' => { body := [p.chord false .lineEnd, p.chord false .deleteForward], repeats := n
+                     records := true
                      state := st.toNormal }
-    | .char 'p' => { body := [Chord.ctrled false (.char 'v')], repeats := n, records := true
+    | .char 'p' => { body := [p.chord false .paste], repeats := n, records := true
                      state := st.toNormal }
-    | .char 'P' => { before := [Chord.plain .home], body := [Chord.ctrled false (.char 'v')]
+    | .char 'P' => { before := [p.chord false .lineStart], body := [p.chord false .paste]
                      repeats := n, records := true, state := st.toNormal }
-    | .char 'u' => { body := [Chord.ctrled false (.char 'z')], repeats := n, state := st.toNormal }
+    | .char 'u' => { body := [p.chord false .undo], repeats := n, state := st.toNormal }
     | .char '.' => { before := st.lastEdit, state := st.toNormal }
     -- searching
-    | .char '/' => { before := [Chord.ctrled false (.char 'f')], state := st.toInsert }
-    | .char 'n' => { body := [Chord.plain (.f 3)], repeats := n, state := st.toNormal }
-    | .char 'N' => { body := [Chord.shifted true (.f 3)], repeats := n, state := st.toNormal }
+    | .char '/' => { before := [p.chord false .find], state := st.toInsert }
+    | .char 'n' => { body := [p.chord false .findNext], repeats := n, state := st.toNormal }
+    | .char 'N' => { body := [p.chord false .findPrev], repeats := n, state := st.toNormal }
     -- visual mode
     | .char 'v' => { state := st.toVisual false }
-    | .char 'V' => { before := [Chord.plain .home, lineDown], state := st.toVisual true }
+    | .char 'V' => { before := [p.chord false .lineStart, lineDown p], state := st.toVisual true }
     -- commands that wait for more keys
     | .char 'd' => { state := st.waiting (.operator .delete st.count) }
     | .char 'c' => { state := st.waiting (.operator .change st.count) }
@@ -364,50 +377,53 @@ def normalCmd (cfg : Config) (st : State) (c : Chord) : Response :=
     | .char '<' => { state := st.waiting (.operator .outdent st.count) }
     | .char 'r' => { state := st.waiting .replace }
     | .char 'g' => { state := st.waiting .gPrefix }
-    | .char 'G' => gotoLine false false st st.count
+    | .char 'G' => gotoLine p false false st st.count
     | _ =>
-      match motion false c with
+      match motion p false c with
       | some ms => { body := ms, repeats := n, state := st.toNormal }
       | none => { state := st.toNormal }
 
 /-- Visual mode: motions grow the selection, operators act on it at once. -/
 def visualCmd (cfg : Config) (st : State) (c : Chord) : Response :=
+  let p := cfg.platform
   let n := cfg.clamp (normCount st.count)
   let linewise := match st.mode with | .visual lw => lw | _ => false
   if c.mods.ctrl then
     match c.key with
-    | .char 'f' | .char 'd' => { body := [Chord.shifted true .pageDown], repeats := n
+    | .char 'f' | .char 'd' => { body := [p.chord true .pageDown], repeats := n
                                  state := st.waiting .idle }
-    | .char 'b' | .char 'u' => { body := [Chord.shifted true .pageUp], repeats := n
+    | .char 'b' | .char 'u' => { body := [p.chord true .pageUp], repeats := n
                                  state := st.waiting .idle }
     | _ => { before := [c], state := st.toNormal }
   else
     match c.key with
     | .char 'd' | .char 'x' | .delete =>
-        { before := [Chord.plain .delete], records := true, state := st.toNormal }
-    | .char 'c' | .char 's' => { before := [Chord.plain .delete], state := st.toInsert }
+        { before := [p.chord false .deleteForward], records := true, state := st.toNormal }
+    | .char 'c' | .char 's' => { before := [p.chord false .deleteForward], state := st.toInsert }
     | .char 'y' =>
         -- copy, then collapse the selection the way the linewise/charwise
         -- flavours of `y` do in normal mode
-        { before := [Chord.ctrled false (.char 'c'),
-                     if linewise then Chord.plain .home else Chord.plain .left]
+        { before := [p.chord false .copy,
+                     p.chord false (if linewise then .lineStart else .charLeft)]
           state := st.toNormal }
-    | .char '>' => { before := [Chord.plain .tab], records := true, state := st.toNormal }
-    | .char '<' => { before := [Chord.shifted true .tab], records := true, state := st.toNormal }
-    | .char 'p' => { before := [Chord.ctrled false (.char 'v')], records := true
+    | .char '>' => { before := [p.chord false .indent], records := true, state := st.toNormal }
+    | .char '<' => { before := [p.chord false .outdent], records := true, state := st.toNormal }
+    | .char 'p' => { before := [p.chord false .paste], records := true
                      state := st.toNormal }
     | .char 'v' => if linewise then { state := st.toVisual false } else { state := st.toNormal }
-    | .char 'V' => { before := [Chord.plain .home, lineDown], state := st.toVisual true }
+    | .char 'V' => { before := [p.chord false .lineStart, lineDown p], state := st.toVisual true }
     | .char 'g' => { state := st.waiting .gPrefix }
-    | .char 'G' => gotoLine true false st st.count
+    | .char 'G' => gotoLine p true false st st.count
     | _ =>
-      match motion true c with
+      match motion p true c with
       | some ms => { body := ms, repeats := n, state := st.waiting .idle }
       | none => { state := st.waiting .idle }
 
 /-- An operator is pending: a doubled key makes it linewise, `i`/`a` start a
 text object, a motion gives it a range, anything else cancels it. -/
-def operatorCmd (cfg : Config) (st : State) (op : Operator) (opCount : Nat) (c : Chord) : Response :=
+def operatorCmd (cfg : Config) (st : State) (op : Operator) (opCount : Nat) (c : Chord) :
+    Response :=
+  let p := cfg.platform
   let n := cfg.clamp (normCount opCount * normCount st.count)
   if c.mods.ctrl || c.mods.alt || c.mods.super then { state := st.toNormal }
   else match c.key with
@@ -416,35 +432,36 @@ def operatorCmd (cfg : Config) (st : State) (op : Operator) (opCount : Nat) (c :
         else if ch == 'i' then { state := st.waiting (.textObj op opCount true) }
         else if ch == 'a' then { state := st.waiting (.textObj op opCount false) }
         else
-          match motion true c with
-          | some ms => applyOver st op [] ms n
+          match motion p true c with
+          | some ms => applyOver p st op [] ms n
           | none => { state := st.toNormal }
     | _ =>
-      match motion true c with
-      | some ms => applyOver st op [] ms n
+      match motion p true c with
+      | some ms => applyOver p st op [] ms n
       | none => { state := st.toNormal }
 
 /-- `diw`, `caw`, ... : select the word under the cursor, then act. -/
 def textObjCmd (cfg : Config) (st : State) (op : Operator) (opCount : Nat) (_inner : Bool)
     (c : Chord) : Response :=
+  let p := cfg.platform
   let n := cfg.clamp (normCount opCount * normCount st.count)
   match c.key with
   | .char 'w' | .char 'W' =>
-      applyOver st op [Chord.ctrled false .left] [Chord.ctrled true .right] n
+      applyOver p st op [p.chord false .wordLeft] [p.chord true .wordRight] n
   | _ => { state := st.toNormal }
 
 /-- `g` is pending. -/
-def gCmd (st : State) (c : Chord) : Response :=
+def gCmd (p : Platform) (st : State) (c : Chord) : Response :=
   let extend := st.mode.isVisual
   match c.key with
-  | .char 'g' => gotoLine extend true st st.count
-  | .char 'e' => { before := [Chord.ctrled extend .left], state := st.waiting .idle }
+  | .char 'g' => gotoLine p extend true st st.count
+  | .char 'e' => { before := [p.chord extend .wordLeft], state := st.waiting .idle }
   | _ => { state := if st.mode.isVisual then st.waiting .idle else st.toNormal }
 
 /-- `r` is pending: the next character overwrites the one under the cursor. -/
-def replaceCmd (st : State) (c : Chord) : Response :=
+def replaceCmd (p : Platform) (st : State) (c : Chord) : Response :=
   match c.key with
-  | .char ch => { before := [Chord.shifted true .right, Chord.plain (.char ch)]
+  | .char ch => { before := [p.chord true .charRight, Chord.plain (.char ch)]
                   records := true, state := st.toNormal }
   | _ => { state := st.toNormal }
 
@@ -453,13 +470,13 @@ def command (cfg : Config) (st : State) (c : Chord) : Response :=
   if c.key == Key.esc then
     { state := st.toNormal }
   else match st.pending with
-  | .replace => replaceCmd st c
+  | .replace => replaceCmd cfg.platform st c
   | pend =>
     match countDigit? st c with
     | some d => { state := { st with count := cfg.clamp (st.count * 10 + d) } }
     | none =>
       match pend with
-      | .gPrefix => gCmd st c
+      | .gPrefix => gCmd cfg.platform st c
       | .textObj op n inner => textObjCmd cfg st op n inner c
       | .operator op n => operatorCmd cfg st op n c
       | _ => if st.mode.isVisual then visualCmd cfg st c else normalCmd cfg st c
@@ -478,7 +495,10 @@ exactly when it forwarded the matching key-down, whatever has happened to the
 mode in between.  That is what keeps a key from getting stuck when you hit Caps
 Lock with a finger still down, and it is what `up_only_if_pressed` proves. -/
 def step (cfg : Config) (st : State) (ev : InputEvent) : State × List OutputEvent :=
-  match ev.dir with
+  if ev.injected then
+    -- our own event, already on its way to the application: hands off
+    (st, [ev.passthrough])
+  else match ev.dir with
   | .up =>
     if st.down.contains ev.key then (st.release ev.key, [⟨.up, ev.key⟩]) else (st, [])
   | .down =>
