@@ -256,6 +256,12 @@ approximations. These are deliberate, and documented here rather than hidden:
   auto-repeat. Fixing it means answering inside the tap callback, against the
   tap's deadline.
 
+## Picking this up
+
+[`HANDOFF.md`](HANDOFF.md) has the current state, what is proved versus tested
+versus never run, how to build it where the usual Lean toolchain hosts are
+blocked, and the open work.
+
 ## Layout
 
 ```
@@ -277,6 +283,7 @@ packaging/homebrew/           the formula, published to the tap on release
 scripts/selftest.sh           end-to-end test of the binary
 scripts/selftest-quartz.sh    the same, over the macOS wire
 scripts/check-axioms.sh       confirms the theorems have no holes
+HANDOFF.md                    state, verification status, gotchas, open work
 ```
 
 ## Configuration
