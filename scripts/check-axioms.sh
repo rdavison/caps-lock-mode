@@ -15,6 +15,8 @@ theorems=(
   Quartz.decode_key
   Hid.reports_settle Hid.reportAfter_chord Hid.encodeFrom_length
   Hid.apply_nodup Hid.reportAfter_nodup Hid.decode_self
+  Kanata.resolve_transparent Kanata.resolve_identity_any Kanata.resolve_identity
+  Kanata.release_undoes_press Kanata.release_restores_holds
 )
 
 tmp=$(mktemp -d)

@@ -18,6 +18,7 @@ About 2,900 lines of Lean, a Python driver, a Swift driver, and packaging.
 | No-stuck-keys | `CapslockMode/Balance.lean` | 25 theorems |
 | The promises | `CapslockMode/Invariants.lean` | 37 theorems |
 | macOS event model | `CapslockMode/Backend/Quartz.lean` | 12 theorems |
+| kanata evaluator | `CapslockMode/Kanata/` | Pure and timeless; 5 theorems |
 | Wire formats, key notation | `CapslockMode/Protocol.lean` | Two wires: `raw`, `quartz` |
 | Monitor rows | `CapslockMode/Monitor.lean` | What a driver displays; pure |
 | Model text field | `CapslockMode/Screen.lean` | Demo and test oracle only |
@@ -30,14 +31,15 @@ About 2,900 lines of Lean, a Python driver, a Swift driver, and packaging.
 
 Three different levels, and the difference matters.
 
-**Proved.** 21 headline theorems, checked sorry-free by
+**Proved.** 32 headline theorems, checked sorry-free by
 `scripts/check-axioms.sh`; they depend only on Lean's three standard axioms.
 The big ones: `step_balanced` (nothing synthesised leaves a key held),
 `up_only_if_pressed` and `down_remembered` (releases match presses across mode
 switches), `run_insert_transparent` (switched off, output is input),
 `esc_resets` and `capsLock_twice` (silent routes back to a known state),
-`step_count_le` and `command_repeats_le` (no key storms), `no_feedback`, and the
-five Quartz theorems.
+`step_count_le` and `command_repeats_le` (no key storms), `no_feedback`, the
+five Quartz theorems, and `Kanata.resolve_identity` (a kanata config of one
+layer of all `_` is the identity function).
 
 **Tested.** `Tests/Basic.lean` and `Tests/Quartz.lean` are `#guard` assertions
 run by `lake build` — vi behaviour judged by typing into `Screen`, plus the
@@ -213,7 +215,8 @@ Quartz, because the risk there is a modifier flag drifting. Here the same
 obligation buys `reports_settle` *and* `apply_nodup`: a level-based wire cannot
 express "the same key held twice", so duplicate-freedom is a well-formedness
 condition on the protocol rather than a tidiness property. Six theorems, all
-sorry-free; `scripts/check-axioms.sh` now covers 27 rather than 21.
+sorry-free; `scripts/check-axioms.sh` covered 27 rather than 21 after it landed,
+and 32 once the kanata evaluator was added (see below).
 
 Two corrections to what this document used to say about it:
 
@@ -262,6 +265,35 @@ point you *are* that layer and inherit everything it was doing.
 
 Keep the probe. It is the fastest way to answer "is something holding the
 keyboard, and which device", and it cannot break anything.
+
+## The kanata evaluator, and the one theorem it exists for
+
+`CapslockMode/Kanata/` is a pure, timeless evaluator for kanata configs: an
+s-expression reader, a key-name table, `defsrc` / `deflayer` / `defalias` /
+`defcfg`, the layer stack, and press/release. It imports **only**
+`CapslockMode/Key.lean` -- no Mathlib, so `Prelude.lean`'s "the Mathlib surface
+is visible in nine lines" property survives -- and nothing in `Machine.lean`,
+`Invariants.lean`, `Balance.lean` or `Backend/` knows it exists yet.
+
+It is there for `Kanata.resolve_identity`: **a config of one layer of all `_`
+resolves every position to its `defsrc` key.** That makes the identity config
+the identity function as a theorem rather than a coincidence, which is what
+would let `insert` stop being a branch hardcoded in `step` and become a mode
+*bound* to this evaluator running a particular config. That binding is not
+built; only the result it would rest on.
+
+The fixture is the real `~/.config/kanata/kanata.kbd`, embedded verbatim in
+`Tests/Fixtures/Kanata.lean` as a raw string, because everything here is pure
+and a `#guard` cannot read a file. It parses whole: 72 positions, 14 layers,
+all exactly 72 wide.
+
+What it refuses, and why the three reasons are kept apart: **needs a clock**
+(`tap-hold`, `one-shot`, `macro`, `defchordsv2`), **needs a world** (`lrld`,
+which is perfectly timeless and just re-reads a file), and **unrecognised**,
+which is a hard error so a typo is never skipped. The first two are recorded in
+`Cfg.blocked` and parsing continues, so the transparency results are about the
+real config rather than a trimmed copy; pressing a position that resolves to one
+is an error naming the form.
 
 ## Dependencies: cslib in, fern deferred
 
