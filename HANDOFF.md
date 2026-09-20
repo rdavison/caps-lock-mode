@@ -23,7 +23,7 @@ About 2,900 lines of Lean, a Python driver, a Swift driver, and packaging.
 | Model text field | `CapslockMode/Screen.lean` | Demo and test oracle only |
 | CLI | `Main.lean` | `run`, `demo`, `trace`, `keys` |
 | Linux driver | `drivers/evdev_bridge.py` | Written, **never run** |
-| macOS driver | `drivers/quartz_bridge.swift` | **Run on real hardware**; intercepts and rebinds |
+| macOS driver | `drivers/quartz_bridge.swift` | **Works on real hardware**; `dd` edits a real field |
 | Packaging | `packaging/homebrew/`, `.github/workflows/release.yml` | Blocked on a tap repo |
 
 ## Verification status — read this before trusting anything
@@ -59,9 +59,23 @@ window shows them being classified, and the modal key can be rebound at runtime
 and re-armed. That is the first end-to-end confirmation that the Lean machine
 and a real keyboard talk to each other.
 
-Still unconfirmed on hardware: that vi commands produce the right edits in a
-real text field (the `Screen` oracle covers this in tests, not in an app), and
-key repeat, which is known broken by design -- see Open work.
+Edits confirmed too: `dd` in a real text field deletes the line, so the
+`Screen` oracle and a real editor agree.
+
+**Key repeat works**, contrary to what this document and the driver's own
+comment claimed for a long time. The old reasoning was that a posted event does
+not auto-repeat -- true, but about the wrong link in the chain. Repeat is
+generated *upstream* of a session tap, and swallowing an event here tells that
+generator nothing, so repeats keep arriving as ordinary events and each is
+handled normally. Observed with kanata in the chain; a bare keyboard should
+behave the same way for the same reason, but that has not been checked.
+
+One thing that costs time if you do not know it: **launch it from your own
+terminal.** macOS attributes the Accessibility grant through the responsible
+process in the launch chain, so a driver started from some other tool's
+subprocess reads as untrusted even though the binary is byte-identical to the
+one you granted. `scripts/monitor.sh` will sit there waiting for a grant that
+already exists.
 
 It also compiles clean. First build, same machine, same day:
 
@@ -163,15 +177,10 @@ unfolding a helper inside a big bash.
 * **Run the Linux driver.** `drivers/evdev_bridge.py` has still never been run.
   The macOS side is done (see above), so this is what is left of "run the
   drivers", and it is still the highest-value unknown on that platform.
-* **Confirm the edits, not just the interception.** macOS shows events arriving
-  and being classified; nobody has yet checked that `dd` in a real text field
-  deletes the line it should. The `Screen` oracle asserts this in tests, which
-  is not the same as a browser or an IDE agreeing.
-* **Key repeat on macOS.** The tap swallows the original event and re-posts a
-  replacement, and posted events do not auto-repeat, so holding a key types it
-  once. The fix is a synchronous answer inside the tap callback (returning the
-  original event when the machine would pass it through), against the tap's
-  deadline — which is also why it was not done this way to begin with.
+* **Check key repeat without an upstream remapper.** It works with kanata in
+  the chain (see above). The mechanism says a bare keyboard should be the same,
+  since the window server's repeat generator also sits above a session tap, but
+  nobody has run it that way.
 * **More backends.** Two exist (`Platform.pc`/evdev and `Platform.mac`/Quartz).
   The value of a third is not coverage — it is that each API forces you to model
   something the others hide:
@@ -191,6 +200,68 @@ unfolding a helper inside a big bash.
   rather than meaning, `V>` indents the following line too, linewise commands on
   the last line leave an empty line. Each is a deliberate compromise of driving
   a text widget you cannot see; revisit only with a specific editor in mind.
+
+## The HID backend, and what a probe settled
+
+`CapslockMode/Backend/Hid.lean` is a third backend: **level** based, where evdev
+and Quartz are edge based. A HID keyboard does not report events, it reports a
+snapshot of everything held, and a reader recovers events by diffing
+consecutive snapshots. Nothing in a report says which key moved.
+
+That difference is the reason to have it. `Balanced` buys `flags_settle` on
+Quartz, because the risk there is a modifier flag drifting. Here the same
+obligation buys `reports_settle` *and* `apply_nodup`: a level-based wire cannot
+express "the same key held twice", so duplicate-freedom is a well-formedness
+condition on the protocol rather than a tidiness property. Six theorems, all
+sorry-free; `scripts/check-axioms.sh` now covers 27 rather than 21.
+
+Two corrections to what this document used to say about it:
+
+* **There is no six-key rollover bound.** The old note assumed the 8-byte boot
+  protocol. The virtual device this targets carries `uint16_t keys[32]`, so the
+  bound does not exist. A boot-protocol backend would need one and would be a
+  different module.
+* **Caps Lock is an ordinary usage here.** That is the practical payoff: an
+  event tap cannot swallow Caps Lock, because the lock state and LED live in
+  IOKit below it, which is why the Quartz driver remaps to F18 with `hidutil`.
+  A seized HID device has no such layer above it.
+
+### What a driver would cost, measured rather than guessed
+
+Verified on a machine running kanata (which re-emits through
+`org.pqrs.Karabiner-DriverKit-VirtualHIDDevice`):
+
+* **Injection** goes through the Karabiner daemon over a UNIX **datagram**
+  socket under `/Library/Application Support/org.pqrs/tmp/rootonly/`. That
+  directory is `drwx------ root:wheel`, so **a client must run as root** -- the
+  enforcement is filesystem, not entitlement. The client itself needs no
+  entitlement and no signing, so the `otool -L` self-containment gate survives:
+  it is `socket`/`sendto` on libSystem plus IOKit.
+* The installed package version, not the `driver_version`, picks the protocol.
+  Here that is package **v6.2.0 / client protocol 5**; upstream has moved to 7
+  with a different socket layout and shifted enum ordinals, and there is no
+  negotiation. A hand-rolled client must pin and assert the version or it fails
+  silently into a log only root can read.
+* **Reading is a separate mechanism** -- `IOHIDDeviceOpen` with
+  `kIOHIDOptionsTypeSeizeDevice` -- needing Input Monitoring *and*
+  Accessibility, both TCC-pinned to the binary path.
+
+### Seizure is opaque, and that is a dead end worth knowing
+
+`drivers/hid_listen.swift` is a diagnostic that opens keyboards with
+`kIOHIDOptionsTypeNone` -- observing, never grabbing. The question was whether a
+passive observer can watch a device some other process has seized, which would
+let a driver see input *before* kanata rewrote it.
+
+It cannot. `IOHIDDeviceOpen` returns `kIOReturnExclusiveAccess` (`0xe00002c5`).
+A seized device is invisible even to a passive reader; only the process holding
+it sees those keys. So there is no way to observe pre-kanata input while kanata
+runs, and "watch what the layer below sees" is not an option -- the only way to
+see those events is to stop that process and seize the device yourself, at which
+point you *are* that layer and inherit everything it was doing.
+
+Keep the probe. It is the fastest way to answer "is something holding the
+keyboard, and which device", and it cannot break anything.
 
 ## Dependencies: cslib in, fern deferred
 

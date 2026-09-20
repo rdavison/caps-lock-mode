@@ -220,6 +220,7 @@ keycodes travel on the wire, the driver needs no key table of its own:
 
     down 4 command          a tap saw kVK_ANSI_H pressed with Cmd held
     flags shift,command     a kCGEventFlagsChanged carrying a new mask
+    dev 45 0                which device the following events came from
     key down 123 shift      inject Shift+Left
     text down x             type the character `x` (no keycode on this layout)
 -/

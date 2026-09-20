@@ -48,6 +48,14 @@ structure Entry where
   input : InputEvent
   state : State
   out : List OutputEvent
+  /-- What the wire called this key, before any naming: the virtual keycode on
+  the Quartz wire, empty elsewhere.
+
+  It is here because the name alone can mislead.  Another remapper upstream --
+  kanata, Karabiner -- substitutes keys before they reach us, so pressing `s`
+  can legitimately arrive as the code for `i`; showing both makes the layering
+  visible instead of looking like a bug in the naming. -/
+  code : String := ""
   deriving Inhabited
 
 /-- Which of the three things happened.  `passthrough` is the same function the
@@ -77,7 +85,8 @@ def row (name : String) (st : State) (out : List OutputEvent) : String :=
 and pass-throughs that `trace` hides. -/
 def entryRow (e : Entry) : String :=
   let mark := if e.input.injected then "*" else " "
-  s!"{mark}{pad e.input.dir.name 5}{pad (inputName e.input) 10}\
+  let code := if e.code.isEmpty then "-" else e.code
+  s!"{mark}{pad e.input.dir.name 5}{pad code 5}{pad (inputName e.input) 10}\
 {pad e.verdict.name 8}{pad e.state.describe 14}{renderEvents e.out}"
 
 /-! ## Wire
@@ -89,13 +98,72 @@ them can drop every line starting with `mon `. -/
 /-- A row, as it travels to a driver. -/
 def line (e : Entry) : String := s!"mon row {entryRow e}"
 
+/-- The keycode a Quartz event carries, for the `code` column.  Flags and
+synthesised text have none. -/
+def codeOf : Quartz.Event → String
+  | .key _ c _ => toString c
+  | .text _ _ _ => ""
+  | .flagsChanged _ => ""
+
+/-- A wire line that produced no events at all.
+
+Worth its own line because the alternative is silence, and silence is how a
+missing entry in the keycode table hides: the key is pressed, nothing appears,
+and nothing says why.  A dropped line is a fact about the table, not noise. -/
+def dropLine (wire : String) : String := s!"mon drop {wire}"
+
+/-! ## Where events came from
+
+A driver may sit below other software that rewrites keys before we ever see
+them -- kanata and Karabiner re-emit through a kernel HID driver, so an event
+tap cannot observe the original press at all.  That makes two different
+silences look alike: a key the layer above swallowed, and a key that arrived
+with no entry in the keycode table.  Reporting the device the events carry
+tells them apart, and shows a keyboard the layer above is *not* grabbing.
+
+The driver only copies two integers off the event.  Remembering them, deciding
+what counts as a change, and saying it in words are all here, so the platform
+side stays a wire and nothing more. -/
+
+/-- The device an event claims to come from.  `pid` is the process that posted
+it; hardware and kernel drivers report 0. -/
+structure Device where
+  kbType : Nat
+  pid : Nat
+  deriving DecidableEq, Repr, Inhabited
+
+def Device.describe (d : Device) : String :=
+  let src := if d.pid == 0 then "a device or driver" else s!"pid {d.pid}"
+  s!"keyboard type {d.kbType}, posted by {src}"
+
+/-- `dev <keyboardType> <pid>`, as a driver spells it.
+
+This is a control line rather than another token on the event line: the Quartz
+event parser matches exact arities, so a fourth field would make every event
+unparseable. -/
+def parseDevice? (s : String) : Option Device :=
+  match (s.trim.splitOn " ").filter (fun w => !w.isEmpty) with
+  | ["dev", t, p] =>
+    if !t.isEmpty && t.all Char.isDigit && !p.isEmpty && p.all Char.isDigit then
+      some { kbType := t.toNat!, pid := p.toNat! }
+    else none
+  | _ => none
+
+def deviceLine (d : Device) : String := s!"mon device {d.describe}"
+
+/-- The whole reporting policy, kept pure so it can be checked: say something
+the first time, and thereafter only when the device actually changes.  A line
+per keystroke would bury the log it is meant to explain. -/
+def deviceChange? (old : Option Device) (new : Device) : Option String :=
+  if old == some new then none else some (deviceLine new)
+
 /-- The summary line: the machine's current mode, count and pending operator. -/
 def stateLine (st : State) : String := s!"mon state {st.describe}"
 
 /-- The column header a driver can show above the rows.  Here rather than in the
 driver so the widths cannot disagree with `entryRow`. -/
 def header : String :=
-  s!" {pad "dir" 5}{pad "key" 10}{pad "did" 8}{pad "mode" 14}emitted"
+  s!" {pad "dir" 5}{pad "code" 5}{pad "key" 10}{pad "did" 8}{pad "mode" 14}emitted"
 
 /-- The header, as it travels to a driver. -/
 def headerLine : String := s!"mon header {header}"

@@ -57,6 +57,10 @@ To watch it work before trusting it with your keyboard:
 ./scripts/monitor.sh          # builds, checks Accessibility, opens the monitor
 ```
 
+Run it from your own terminal: macOS resolves the Accessibility grant through
+the responsible process in the launch chain, so starting it from another tool's
+subprocess reads as untrusted even when the binary is the one you granted.
+
 The window opens **disarmed** -- nothing is intercepted until you press Start --
 and shows every event the tap sees, with what the machine did to it:
 
@@ -69,7 +73,11 @@ and shows every event the tap sees, with what the machine did to it:
 ```
 
 `pass` is a key handed straight back, `rewrite` one swallowed and replaced,
-`hold` one swallowed with nothing emitted yet. The modal key can be changed in
+`hold` one swallowed with nothing emitted yet. A code with no entry in the key
+table is reported rather than dropped in silence, and a line names the device
+events are arriving from -- which matters when something else (kanata,
+Karabiner) sits below and re-emits through its own driver, because then the
+codes you see are the ones *it* produced, not the keys you pressed. The modal key can be changed in
 the window and re-armed without restarting, which matters if another remapper
 (kanata, Karabiner) already owns Caps Lock. The red close button quits and
 restores the keyboard.
@@ -270,10 +278,6 @@ approximations. These are deliberate, and documented here rather than hidden:
   `Shift+Down` has nowhere to go.
 * **No registers, marks, macros or `:` commands.** There is nowhere to put
   them: CapslockMode does not own the text.
-* **On macOS, holding a key does not repeat it.** The event tap swallows the
-  original event and re-posts a replacement, and a posted event does not
-  auto-repeat. Fixing it means answering inside the tap callback, against the
-  tap's deadline.
 
 ## Picking this up
 
@@ -310,7 +314,8 @@ HANDOFF.md                    state, verification status, gotchas, open work
 ```
 --platform <name>   keystrokes to compile commands into: pc (default) or mac
 --wire <name>       protocol spoken by `run`: raw (default) or quartz
---toggle <key>      key that switches modes (default: caps)
+--toggle <key>      key that switches modes (default: caps); a name, a bare
+                    keycode of 2+ digits, or code:<n> for any keycode
 --max-count <n>     largest accepted count prefix (default: 100)
 --start-normal      start in normal mode
 --no-esc            do not let Esc return to normal mode from insert

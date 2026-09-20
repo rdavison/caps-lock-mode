@@ -112,6 +112,12 @@ final class LogBuffer {
             append(String(s.dropFirst("row ".count)))
         } else if s.hasPrefix("header ") {
             append(String(s.dropFirst("header ".count)))
+        } else if s.hasPrefix("device ") {
+            append("  -- " + String(s.dropFirst("device ".count)))
+        } else if s.hasPrefix("drop ") {
+            // A wire line the machine could not turn into anything. Marked so it
+            // stands out: this is the shape a missing keycode-table entry takes.
+            append("  !! dropped, no key of that code: " + String(s.dropFirst("drop ".count)))
         } else {
             append(s)
         }
@@ -408,6 +414,16 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
         if event.getIntegerValueField(.eventSourceUserData) == signature {
             return Unmanaged.passUnretained(event)   // ours: hands off
         }
+        // Copy the device fields onto the wire and let the machine decide what
+        // they mean. Deliberately unconditional rather than "only when it
+        // changes": keeping the comparison here would put state and policy in
+        // the platform layer, and one extra pipe write is microseconds against
+        // the tap's millisecond deadline. `sendLine`, not `send`, so a
+        // diagnostic is not counted as an intercepted event.
+        if opts.monitor {
+            sendLine("dev \(event.getIntegerValueField(.keyboardEventKeyboardType)) "
+                     + "\(event.getIntegerValueField(.eventSourceUnixProcessID))")
+        }
         let flags = flagNames(event.flags)
         if type == .flagsChanged {
             send("flags \(flags)")
@@ -418,11 +434,14 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
         // Everything is swallowed and replayed by the reader thread, which is
         // what keeps the callback off the pipe's round trip.
         //
-        // The cost is key repeat: the original event is gone, and a posted
-        // event does not auto-repeat, so holding a key down types it once.
-        // Fixing that means waiting for the machine's answer inside the
-        // callback and returning the original event when it is a pass-through
-        // -- a synchronous round trip, with the tap's deadline to respect.
+        // This was long assumed to cost key repeat, on the grounds that a
+        // posted event does not auto-repeat. That reasoning is about the wrong
+        // link. Auto-repeat is generated upstream of a session tap -- by the
+        // window server, or by another remapper like kanata -- and swallowing
+        // an event here tells that generator nothing. So the repeats keep
+        // arriving as ordinary events and each one is handled normally.
+        // Observed working with kanata upstream; a bare keyboard is expected to
+        // behave the same way for the same reason, but has not been checked.
         return nil
     default:
         return Unmanaged.passUnretained(event)

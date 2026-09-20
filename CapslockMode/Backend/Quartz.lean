@@ -61,11 +61,6 @@ def toMask (f : Flags) : UInt32 :=
 
 end Flags
 
-/-- `true` for a press. -/
-def _root_.CapslockMode.Dir.isDown : Dir → Bool
-  | .down => true
-  | .up => false
-
 /-- The flags a chord's modifiers ask for. -/
 def flagsOf (m : Mods) : Flags :=
   { shift := m.shift, control := m.ctrl, option := m.alt, command := m.super }

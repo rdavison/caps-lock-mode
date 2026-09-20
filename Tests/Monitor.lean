@@ -78,6 +78,53 @@ prefixes must be exactly what the drivers look for. -/
 #guard headerLine.startsWith "mon header "
 
 #guard stateLine N.start == "mon state normal"
+
+/-! ## The keycode column
+
+The name alone can mislead when another remapper sits upstream, so the code the
+wire carried is shown beside it. -/
+
+#guard codeOf (.key .down 2 {}) == "2"
+#guard codeOf (.flagsChanged {}) == ""
+#guard codeOf (.text .down 'x' {}) == ""
+
+-- An entry with no code reads as `-` rather than a blank the eye slides over.
+#guard (entryRow { input := down (ch 'd'), state := N.start, out := [] }).startsWith " down -    d"
+#guard (entryRow { input := down (ch 'd'), state := N.start, out := [], code := "2" }).startsWith " down 2    d"
+
+-- The header must line up with the row it labels; both are built from `pad`
+-- here so a driver cannot disagree about the widths.
+#guard header.startsWith " dir  code key"
+
+/-! ## Drops
+
+A wire line that yields no events is the failure that hid the missing F13
+entry: the key was pressed, nothing appeared, and nothing said why. -/
+
+#guard dropLine "down 999 -" == "mon drop down 999 -"
+
+/-! ## Devices
+
+Another remapper may sit below us and re-emit through its own driver, so the
+device an event claims matters. The policy is "say it once, then only on a
+change" -- a line per keystroke would bury the log it exists to explain. -/
+
+#guard parseDevice? "dev 45 0" == some { kbType := 45, pid := 0 }
+#guard parseDevice? "dev 99 518" == some { kbType := 99, pid := 518 }
+#guard parseDevice? "dev x y" == none
+#guard parseDevice? "dev 45" == none
+#guard parseDevice? "down 2 -" == none
+
+-- Hardware and kernel drivers post with pid 0, which is what a virtual HID
+-- device shows; anything else names the process.
+#guard Device.describe { kbType := 45, pid := 0 } == "keyboard type 45, posted by a device or driver"
+#guard Device.describe { kbType := 99, pid := 518 } == "keyboard type 99, posted by pid 518"
+
+#guard deviceChange? none { kbType := 45, pid := 0 } |>.isSome
+#guard deviceChange? (some { kbType := 45, pid := 0 }) { kbType := 45, pid := 0 } == none
+#guard deviceChange? (some { kbType := 45, pid := 0 }) { kbType := 99, pid := 0 } |>.isSome
+#guard deviceChange? (some { kbType := 45, pid := 0 }) { kbType := 45, pid := 518 } |>.isSome
+#guard deviceChange? none { kbType := 45, pid := 0 } == some "mon device keyboard type 45, posted by a device or driver"
 #guard stateLine (entryOf N N.start (down (ch 'd'))).state == "mon state normal d"
 
 -- An injected event is marked, because a monitor that cannot show the machine

@@ -47,7 +47,8 @@ USAGE:
 OPTIONS:
   --platform <name>   keystrokes to compile commands into: pc (default) or mac
   --wire <name>       protocol spoken by `run`: raw (default) or quartz
-  --toggle <key>      key that switches modes (default: caps)
+  --toggle <key>      key that switches modes (default: caps); a name, a bare
+                      keycode of 2+ digits, or code:<n> for any keycode
   --max-count <n>     largest accepted count prefix (default: 100)
   --start-normal      start in normal mode instead of insert
   --no-esc            do not let Esc return to normal mode from insert
@@ -61,9 +62,15 @@ SCRIPTS use vim key notation: 'ihello<Esc>dd', '<Caps>3jdw', '<C-r>'."
 `--wire quartz`, a bare virtual keycode.  Shared by the `--toggle` flag and the
 `toggle` command, so the two cannot drift. -/
 def parseToggle? (k : String) : Option PhysKey :=
-  let byCode : Option PhysKey :=
-    if !k.isEmpty && k.all Char.isDigit then Quartz.physOf? (UInt16.ofNat k.toNat!) else none
-  parsePhysKey? k <|> byCode
+  let asCode (n : String) : Option PhysKey :=
+    if !n.isEmpty && n.all Char.isDigit then Quartz.physOf? (UInt16.ofNat n.toNat!) else none
+  match k.splitOn ":" with
+  -- `code:8` is keycode 8.  Bare `8` is the `8` key, because a single character
+  -- is a key name first (`Protocol.parsePhysKey?`), which makes keycodes 0-9
+  -- unreachable without this form.  Bare codes of two digits or more still
+  -- work, so existing `--toggle 57` keeps meaning Caps Lock.
+  | ["code", n] => asCode n
+  | _ => parsePhysKey? k <|> asCode k
 
 /-- Parse the options that may follow a subcommand. -/
 partial def parseOpts (args : List String) (o : Opts) : Except String (Opts × List String) :=
@@ -105,18 +112,30 @@ machine expects, and `fout` is what we have told macOS, so that a modifier held
 across two keystrokes in insert mode is not dropped.  `Quartz.flags_settle` is
 why command mode can share `fout` safely: an emitted command always hands the
 flag state back as it found it. -/
-partial def runQuartz (o : Opts) (st : State) (fin fout : Quartz.Flags) : IO Unit := do
+partial def runQuartz (o : Opts) (st : State) (fin fout : Quartz.Flags)
+    (dev : Option Monitor.Device := none) : IO Unit := do
   let stdin ← IO.getStdin
   let stdout ← IO.getStdout
   let stderr ← IO.getStderr
   let line ← stdin.getLine
   if line.isEmpty then return ()
   let trimmed := line.trim
-  if trimmed.isEmpty || trimmed.startsWith "#" then runQuartz o st fin fout
+  if trimmed.isEmpty || trimmed.startsWith "#" then runQuartz o st fin fout dev
   else if trimmed == "?" then
     stdout.putStrLn s!"# mode: {st.describe}"
     stdout.flush
-    runQuartz o st fin fout
+    runQuartz o st fin fout dev
+  else if trimmed.startsWith "dev" then
+    match Monitor.parseDevice? trimmed with
+    | some d =>
+      if o.monitor then
+        if let some report := Monitor.deviceChange? dev d then
+          stdout.putStrLn report
+          stdout.flush
+      runQuartz o st fin fout (some d)
+    | none =>
+      stderr.putStrLn s!"# ignored: {trimmed}"
+      runQuartz o st fin fout dev
   else if trimmed.startsWith "toggle" then
     -- Rebinding resets the machine: changing the key that leaves normal mode
     -- while sitting in normal mode would otherwise strand the keyboard.
@@ -128,25 +147,37 @@ partial def runQuartz (o : Opts) (st : State) (fin fout : Quartz.Flags) : IO Uni
         stdout.putStrLn s!"# toggle: {pk.name}"
         if o.monitor then stdout.putStrLn (Monitor.stateLine o.cfg.start)
         stdout.flush
-        runQuartz o o.cfg.start fin fout
+        -- The machine resets, but the device does not: rebinding a key says
+        -- nothing about which keyboard the events are coming from, and
+        -- re-announcing it would look like a device change that never happened.
+        runQuartz o o.cfg.start fin fout dev
       | none =>
         stderr.putStrLn s!"# unknown key: {k}"
-        runQuartz o st fin fout
+        runQuartz o st fin fout dev
     | _ =>
       stderr.putStrLn s!"# usage: toggle <key>"
-      runQuartz o st fin fout
+      runQuartz o st fin fout dev
   else match Quartz.parseLine? trimmed with
     | none =>
       stderr.putStrLn s!"# ignored: {trimmed}"
-      runQuartz o st fin fout
+      if o.monitor then
+        stdout.putStrLn (Monitor.dropLine trimmed)
+        stdout.flush
+      runQuartz o st fin fout dev
     | some (ev, injected) =>
       let (fin', evs) := Quartz.decode fin injected ev
+      -- A line that decodes to nothing is the failure that hides: a keycode
+      -- absent from the table produces no events and, without this, no output
+      -- either.  Say so rather than looking dead.
+      if o.monitor && evs.isEmpty then
+        stdout.putStrLn (Monitor.dropLine trimmed)
+      let code := Monitor.codeOf ev
       let mut st := st
       let mut fout := fout
       for iev in evs do
         let (st', out) := step o.cfg st iev
         if o.monitor then
-          stdout.putStrLn (Monitor.line { input := iev, state := st', out := out })
+          stdout.putStrLn (Monitor.line { input := iev, state := st', out := out, code := code })
           if st'.describe != st.describe then
             stdout.putStrLn (Monitor.stateLine st')
         st := st'
@@ -154,7 +185,7 @@ partial def runQuartz (o : Opts) (st : State) (fin fout : Quartz.Flags) : IO Uni
           stdout.putStrLn qe.line
         fout := Quartz.flagsAfter fout out
       stdout.flush
-      runQuartz o st fin' fout
+      runQuartz o st fin' fout dev
 
 /-- The filter: one line in, zero or more lines out. -/
 partial def runFilter (o : Opts) (st : State) : IO Unit := do
@@ -182,6 +213,9 @@ partial def runFilter (o : Opts) (st : State) : IO Unit := do
   else match parseLine? line with
   | none =>
     stderr.putStrLn s!"# ignored: {line.trim}"
+    if o.monitor then
+      stdout.putStrLn (Monitor.dropLine line.trim)
+      stdout.flush
     runFilter o st
   | some .ignore => runFilter o st
   | some .query =>

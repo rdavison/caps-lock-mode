@@ -95,6 +95,12 @@ inductive Dir where
   | down | up
   deriving DecidableEq, Repr, Inhabited
 
+/-- `true` for a press.  Here rather than in a backend because every backend
+that folds a stream into state needs it. -/
+def Dir.isDown : Dir → Bool
+  | .down => true
+  | .up => false
+
 /-- An event arriving from the keyboard driver.  `mods` is the driver's view of
 the modifier state at the time of the event; CapslockMode uses it to recognise
 chords such as `Ctrl+R` but never trusts it for output. -/

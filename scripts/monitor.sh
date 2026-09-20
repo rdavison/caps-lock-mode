@@ -34,22 +34,32 @@ NEW="$(cdhash "$BIN")"
 OLD="$(cat "$STAMP" 2>/dev/null || true)"
 printf '%s' "$NEW" > "$STAMP"
 
-if [ -n "$OLD" ] && [ "$OLD" != "$NEW" ]; then
-  echo
-  echo "!! The driver changed since you last granted Accessibility."
-  echo "   macOS keys the grant to the old identity, so any existing entry is"
-  echo "   now dead. You must REMOVE the capslockmode-quartz entry and add it"
-  echo "   again -- re-ticking the old one does nothing."
-  echo
-fi
+CHANGED=no
+if [ -n "$OLD" ] && [ "$OLD" != "$NEW" ]; then CHANGED=yes; fi
 
+# Check the grant before saying anything about it.  A rebuild changes this
+# binary's code identity, and the documented expectation is that the grant dies
+# with it -- but observation says otherwise: a grant made for one build has
+# survived later rebuilds at the same path.  So report what is true now rather
+# than what the identity change predicts.
 if "$BIN" --check >/dev/null 2>&1; then
   echo "==> Accessibility: granted"
+  if [ "$CHANGED" = yes ]; then
+    echo "    (identity changed since the grant, and it still holds)"
+  fi
 else
   BINPATH="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
   echo "==> Accessibility: NOT granted"
-  echo "    Add (or remove and re-add) this exact path:"
+  if [ "$CHANGED" = yes ]; then
+    echo "    The driver was rebuilt since the last grant, so REMOVE the existing"
+    echo "    capslockmode-quartz entry before adding it back -- re-ticking a dead"
+    echo "    entry does nothing."
+  fi
+  echo "    Add this exact path:"
   echo "      $BINPATH"
+  echo "    (run this from your own terminal: macOS resolves the grant through"
+  echo "     the responsible process, so another tool's subprocess reads as"
+  echo "     untrusted even with the same binary)"
   open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" || true
   echo -n "    waiting for the grant (Ctrl-C to launch anyway)"
   for _ in $(seq 1 120); do

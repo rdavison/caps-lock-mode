@@ -3,6 +3,7 @@ CapslockMode: a modal, vi-like keyboard layer that Caps Lock switches on and off
 
 * `CapslockMode.Key`        keys, chords, events
 * `CapslockMode.Machine`    the modal state machine — all of the behaviour
+* `CapslockMode.Backend.Hid` a level-based backend: reports, not events
 * `CapslockMode.Protocol`   the stdin/stdout wire format and vim key notation
 * `CapslockMode.Monitor`    rendering what the machine just did, for a driver to show
 * `CapslockMode.Screen`     a model text field, to aim the machine at
@@ -11,6 +12,7 @@ CapslockMode: a modal, vi-like keyboard layer that Caps Lock switches on and off
 -/
 import CapslockMode.Key
 import CapslockMode.Machine
+import CapslockMode.Backend.Hid
 import CapslockMode.Protocol
 import CapslockMode.Monitor
 import CapslockMode.Screen

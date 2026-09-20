@@ -13,6 +13,8 @@ theorems=(
   no_feedback
   Quartz.encode_chord Quartz.encode_length Quartz.flags_settle Quartz.chordsOf_encode
   Quartz.decode_key
+  Hid.reports_settle Hid.reportAfter_chord Hid.encodeFrom_length
+  Hid.apply_nodup Hid.reportAfter_nodup Hid.decode_self
 )
 
 tmp=$(mktemp -d)
