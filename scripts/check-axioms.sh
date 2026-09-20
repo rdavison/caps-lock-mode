@@ -17,6 +17,7 @@ theorems=(
   Hid.apply_nodup Hid.reportAfter_nodup Hid.decode_self
   Kanata.resolve_transparent Kanata.resolve_identity_any Kanata.resolve_identity
   Kanata.release_undoes_press Kanata.release_restores_holds
+  Bridge.code_roundTrip Bridge.toKeyCode_injective
 )
 
 tmp=$(mktemp -d)

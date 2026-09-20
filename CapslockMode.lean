@@ -10,6 +10,7 @@ CapslockMode: a modal, vi-like keyboard layer that Caps Lock switches on and off
 * `CapslockMode.Balance`    what "no stuck keys" means, and why chords satisfy it
 * `CapslockMode.Invariants` the promises: transparency, escape hatches, bounds
 * `CapslockMode.Kanata`     a pure, timeless evaluator for kanata configs
+* `CapslockMode.Bridge`     kanata positions and macOS keycodes are the same positions
 -/
 import CapslockMode.Key
 import CapslockMode.Machine
@@ -20,3 +21,4 @@ import CapslockMode.Screen
 import CapslockMode.Balance
 import CapslockMode.Invariants
 import CapslockMode.Kanata
+import CapslockMode.Bridge
