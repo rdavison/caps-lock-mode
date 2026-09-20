@@ -44,6 +44,20 @@ def stack (cfg : Cfg n) (st : St) : List Nat :=
   st.holds.flatMap (fun h => h.2.hold) ++
     st.base :: (if cfg.delegateToFirstLayer then [0] else [])
 
+/-- Discharge `use-defsrc`.
+
+`_` and `use-defsrc` name the same key whenever the layers above happen to be
+transparent too, and they are not the same thing: `_` keeps looking and
+`use-defsrc` stops.  So this runs on the action that was **found**, after the
+walk, and never on the way down.
+
+The flag is cleared rather than left set, so that a resolved `Action` is a
+statement about codes only and `resolve` is idempotent.  A `use-defsrc` merged
+into a `multi` therefore lands after the codes written beside it; that cost is
+stated in `Config.lean`'s header with the other two costs of the flat record. -/
+def expandSrc (cfg : Cfg n) (p : Fin n) (a : Action) : Action :=
+  if a.src then { a with keys := a.keys ++ [cfg.src[p.val]'p.isLt], src := false } else a
+
 /-- What pressing position `p` means right now.
 
 An out-of-range layer index behaves as transparent, which is what keeps this
@@ -51,7 +65,7 @@ total without a `Fin cfg.layers.length` that `Cfg` cannot carry.  The parser is
 what actually rules the case out. -/
 def resolve (cfg : Cfg n) (st : St) (p : Fin n) : Action :=
   match (stack cfg st).findSome? (fun i => (cfg.layers[i]?).bind (fun L => L.acts[p.val]'p.isLt)) with
-  | some a => a
+  | some a => expandSrc cfg p a
   | none => { keys := [cfg.src[p.val]'p.isLt] }
 
 /-- `resolve` at a position given as a plain number, for callers that have not

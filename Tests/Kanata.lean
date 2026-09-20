@@ -80,8 +80,99 @@ private def forms (s : String) : Option (List String) :=
   fun s => (Code.ofName? s).isSome)
 
 -- `name` and `ofName?` are independent tables, so drift between them is caught
--- here rather than by a proof there is nothing to induct over.
+-- here rather than by a proof there is nothing to induct over.  `Extra` is the
+-- half of `every` that could go stale silently, and `Extra.mem_every` proves it
+-- has not.
 #guard Code.every.all fun c => Code.ofName? c.name == some c
+
+-- 111 before the table was taken from kanata's own source; the numpad, the
+-- mouse, the Japanese input keys, the application keys and the ten `nop`s are
+-- the difference.
+#guard Code.every.length == 180
+
+/-! ### Both spellings of a key, which is what many-to-one buys -/
+
+#guard Code.ofName? "kp5" == Code.ofName? "Numpad5"
+#guard Code.ofName? "kprt" == Code.ofName? "NumpadEnter"
+#guard Code.ofName? "mlft" == Code.ofName? "mouseleft"
+#guard Code.ofName? "102d" == Code.ofName? "IntlBackslash"
+#guard Code.ofName? "ro" == Code.ofName? "IntlRo"
+#guard Code.ofName? "nuhs" == Code.ofName? "NonUSPound"
+#guard Code.ofName? "wkup" == Code.ofName? "WakeUp"
+#guard Code.ofName? "bck" == Code.ofName? "BrowserBack"
+#guard Code.ofName? "fwd" == Code.ofName? "BrowserForward"
+#guard Code.ofName? "sls" == Code.ofName? "SpotLightSearch"
+#guard Code.ofName? "mctl" == Code.ofName? "MissionControl"
+
+/-! ### The Unicode aliases -/
+
+#guard Code.ofName? "⌫" == Code.ofName? "bspc"
+#guard Code.ofName? "⎋" == Code.ofName? "esc"
+#guard Code.ofName? "↹" == Code.ofName? "tab"
+#guard Code.ofName? "⏎" == Code.ofName? "ret"
+#guard Code.ofName? "⌦" == Code.ofName? "del"
+#guard Code.ofName? "␣" == Code.ofName? "spc"
+#guard Code.ofName? "⇪" == Code.ofName? "caps"
+#guard Code.ofName? "←" == Code.ofName? "left"
+#guard Code.ofName? "→" == Code.ofName? "rght"
+#guard Code.ofName? "⇞" == Code.ofName? "pgup"
+#guard Code.ofName? "🌐" == Code.ofName? "fn"
+#guard Code.ofName? "🔢₅" == Code.ofName? "kp5"
+
+-- The modifier spellings put the guillemet on the side the key is on, which is
+-- the only thing telling `‹⇧` from `⇧›`.
+#guard Code.ofName? "‹⇧" == some (.modifier .shift .left)
+#guard Code.ofName? "⇧›" == some (.modifier .shift .right)
+#guard Code.ofName? "‹⌃" == some (.modifier .ctrl .left)
+#guard Code.ofName? "⌃›" == some (.modifier .ctrl .right)
+#guard Code.ofName? "‹⌥" == some (.modifier .alt .left)
+#guard Code.ofName? "⇮" == some (.modifier .alt .right)
+#guard Code.ofName? "‹⌘" == some (.modifier .super .left)
+#guard Code.ofName? "⌘›" == some (.modifier .super .right)
+
+/-! ### Five places kanata's table is not what it looks like
+
+All five would be guesses if this file had not been read against
+`parser/src/keys/mod.rs`, and all five would be wrong. -/
+
+-- `kp=` is Clear.  The numpad `=` has no short name at all.
+#guard Code.ofName? "kp=" == some (.extra .clear)
+#guard Code.ofName? "clr" == some (.extra .clear)
+#guard Code.ofName? "NumpadEqual" == some (.extra .kpEqual)
+
+-- The ASCII `yen` is Backslash, because in some locales they share a position.
+-- Only the Unicode spelling is the yen key.
+#guard Code.ofName? "yen" == some (.key (.char '\\'))
+#guard Code.ofName? "¥" == some (.extra .yen)
+
+-- `+` is the *numpad* plus, not the shifted `=` of the digit row.
+#guard Code.ofName? "+" == some (.extra .kpPlus)
+
+-- `{` and `}` are the bracket keys, unshifted.
+#guard Code.ofName? "{" == Code.ofName? "["
+#guard Code.ofName? "}" == Code.ofName? "]"
+
+-- The non-US backslash is `102d`.  `102nd` is evdev's name for the same key and
+-- kanata does not take it, so neither does this.
+#guard Code.ofName? "<" == some (.extra .intlBackslash)
+#guard Code.ofName? "lsgt" == some (.extra .intlBackslash)
+#guard Code.ofName? "nubs" == some (.extra .intlBackslash)
+#guard Code.ofName? "102nd" == none
+
+/-! ### The Japanese input block
+
+`kana` is read as `KEY_HANGEUL` by a real macOS kanata and as
+`KEY_KATAKANAHIRAGANA` by a Linux one.  This table is the platform-free build,
+so it is the second. -/
+
+#guard Code.ofName? "kana" == some (.extra .katakanaHiragana)
+#guard Code.ofName? "katakanahiragana" == Code.ofName? "kana"
+#guard Code.ofName? "hiragana" == some (.extra .hiragana)
+#guard Code.ofName? "katakana" == some (.extra .katakana)
+#guard Code.ofName? "henkan" == some (.extra .henkan)
+#guard Code.ofName? "muhenkan" == some (.extra .muhenkan)
+#guard Code.ofName? "eisu" == some (.extra .hanja)
+#guard Code.ofName? "Lang2" == Code.ofName? "eisu"
 
 /-! ## The bridge back to `PhysKey` -/
 
@@ -101,6 +192,11 @@ private def aliasCfg : String :=
   "(defsrc a b c)\n(defalias x lctl  y (multi @x lsft))\n(deflayer base @y _ _)"
 
 private def names (a : Action) : List String := a.keys.map Code.name
+
+/-- What a position resolves to, in key names.  `none` is "no such position";
+`some []` is a position that resolves to no keystroke at all. -/
+private def at? (cfg : Cfg n) (st : St) (i : Nat) : Option (List String) :=
+  (resolveAt? cfg st i).map names
 
 #guard ((parseAs 3 aliasCfg).toOption.bind (fun c => resolveAt? c {} 0)).map names
   == some ["lctl", "lsft"]
@@ -145,9 +241,6 @@ private def srcName (i : Nat) : String :=
   match pos? 72 i with
   | some p => (real.src[p.val]'p.isLt).name
   | none => "?"
-
-private def at? (cfg : Cfg 72) (st : St) (i : Nat) : Option (List String) :=
-  (resolveAt? cfg st i).map names
 
 #guard (parseAs 72 Fixture.kanataKbd).toOption.isSome
 
@@ -296,16 +389,104 @@ private def chordCfg : Cfg 3 :=
 -- key name is, which is why this can never bite in practice.
 #guard Code.ofName? "min" == some (.key (.char '-'))
 
+/-! ## `use-defsrc`, and how it differs from `_`
+
+Both name the `defsrc` key, and they are not the same thing: `_` keeps walking
+and takes whatever the next layer down says, `use-defsrc` stops.  They agree
+whenever the layers below happen to be transparent too, which is why the test
+below is set up so that they do not. -/
+
+private def srcCfg : Cfg 2 :=
+  (parseAs 2 "(defsrc a b)\n(deflayer base x y)\n(deflayer over use-defsrc _)").toOption.getD
+    (Cfg.identity (Vector.replicate 2 .capsLock))
+
+/-- Layer 1 (`over`) held above layer 0 (`base`), so the walk is `over`, `base`,
+`defsrc` and all three say something different. -/
+private def overHeld : St := { base := 0, holds := [(9, { hold := [1] })] }
+
+-- Position 0 is `use-defsrc` in `over`: it takes `defsrc`'s `a` and never sees
+-- the `x` one layer down.
+#guard at? srcCfg overHeld 0 == some ["a"]
+-- Position 1 is `_` in `over`: it keeps looking and finds `base`'s `y`.
+#guard at? srcCfg overHeld 1 == some ["y"]
+-- With nothing held both are the base layer's own entries, which is the case
+-- where the two would have looked alike.
+#guard at? srcCfg {} 0 == some ["x"]
+#guard at? srcCfg {} 1 == some ["y"]
+
+-- The flag is gone from the resolved action: `resolve` is where `use-defsrc`
+-- stops existing, and running it twice cannot press `defsrc` twice.
+#guard (resolveAt? srcCfg overHeld 0).map (·.src) == some false
+
+private def srcAliasCfg : Cfg 2 :=
+  (parseAs 2 "(defsrc a b)\n(defalias u use-defsrc)\n(deflayer base @u @u)").toOption.getD
+    (Cfg.identity (Vector.replicate 2 .capsLock))
+
+-- The same alias on two positions has to mean two different keys, which is why
+-- `use-defsrc` cannot be resolved at parse time even though `defsrc` is already
+-- known by then.
+#guard at? srcAliasCfg {} 0 == some ["a"]
+#guard at? srcAliasCfg {} 1 == some ["b"]
+
+-- Inside a `multi` it lands after the codes written beside it -- the third
+-- stated cost of `Action` being a flat record.
+#guard ((parseAs 1 "(defsrc a)\n(deflayer base (multi lsft use-defsrc))").toOption.bind
+  (fun c => resolveAt? c {} 0)).map names == some ["lsft", "a"]
+
+-- It is an action and not a key name, so `defsrc` will not take it.
+#guard (parseAs 1 "(defsrc use-defsrc)\n(deflayer base a)").toOption == none
+
+/-! ## `unicode`
+
+A character is not a key.  `(unicode x)` types `x` whatever the layout would
+have made of the `x` position, so it produces no `Code` at all -- and no
+`Event`, because an `Event` is a code going down and coming up and a typed
+character has no release to give back. -/
+
+private def uniCfg : Cfg 3 :=
+  (parseAs 3 "(defsrc a b c)\n\
+    (deflayer base (unicode U+1F686) (🔣 x) (multi lsft (unicode U+00E9)))").toOption.getD
+    (Cfg.identity (Vector.replicate 3 .capsLock))
+
+#guard (resolveAt? uniCfg {} 0).map (·.text) == some [Char.ofNat 0x1F686]
+#guard (resolveAt? uniCfg {} 1).map (·.text) == some ['x']
+#guard (resolveAt? uniCfg {} 2).map (fun a => (names a, a.text))
+  == some (["lsft"], [Char.ofNat 0xE9])
+
+-- `(unicode x)` is the character and not the `x` key.
+#guard at? uniCfg {} 1 == some []
+
+-- Pressing emits the codes and not the text.  The text is read off the action,
+-- which is the same seam a `Machine` integration has to fill anyway: `Key` has
+-- no `é` either.
+#guard (runIx uniCfg {} [(.down, 2), (.up, 2)]).toOption.map (fun r => render r.2)
+  == some "down lsft up lsft"
+
+-- A surrogate is not a character, an ordinary word is not a codepoint, and
+-- kanata takes exactly one argument.
+#guard (parseAs 1 "(defsrc a)\n(deflayer base (unicode U+D800))").toOption == none
+#guard (parseAs 1 "(defsrc a)\n(deflayer base (unicode abc))").toOption == none
+#guard (parseAs 1 "(defsrc a)\n(deflayer base (unicode))").toOption == none
+#guard (parseAs 1 "(defsrc a)\n(deflayer base (unicode a b))").toOption == none
+
 /-! ## Forms this evaluator refuses -/
 
 #guard real.blocked ==
-  [ { form := "defchordsv2", site := "top level" }
-  , { form := "tap-hold", site := "alias @grv-mode" }
-  , { form := "tap-hold", site := "alias @cap" }
-  , { form := "one-shot", site := "alias @rect" }
-  , { form := "macro", site := "alias @lchev" }
-  , { form := "macro", site := "alias @rchev" }
-  , { form := "lrld", site := "deflayer layers" } ]
+  [ { form := "defchordsv2", site := "top level", reason := .clock }
+  , { form := "tap-hold", site := "alias @grv-mode", reason := .clock }
+  , { form := "tap-hold", site := "alias @cap", reason := .clock }
+  , { form := "one-shot", site := "alias @rect", reason := .clock }
+  , { form := "macro", site := "alias @lchev", reason := .clock }
+  , { form := "macro", site := "alias @rchev", reason := .clock }
+  , { form := "lrld", site := "deflayer layers", reason := .world } ]
+
+-- Six of the seven wait on a timestamp and one does not, which is the whole
+-- reason the reason is recorded.
+#guard (real.blocked.filter (·.reason == .world)).map (·.form) == ["lrld"]
+#guard real.blocked.all (·.reason != .history)
+
+#guard Blocked.describe { form := "lrld", site := "deflayer layers", reason := .world }
+  == "lrld in deflayer layers (needs the world outside the keyboard)"
 
 -- `@grv-mode` is used at position 13 of four different layers and reported
 -- once, at the alias that defines it.
@@ -318,6 +499,80 @@ private def chordCfg : Cfg 3 :=
 -- Pressing a blocked position is a named failure, not a wrong keystroke.
 #guard (match runIx real {} [(.down, 13)] with | .error m => m | .ok _ => "")
   == "position 13 resolves to tap-hold, which this evaluator does not model"
+
+/-! ### Refused, not unrecognised
+
+Each of these used to fail as an *unknown atom*, so the whole file stopped
+loading and the message said "unrecognised" where the truth was "supported by
+kanata, not modelled here, and here is what it would take".  What the guards
+below assert is the difference: the config parses, and what it parses to names
+the form and the reason. -/
+
+/-- The one-position config whose only entry is `e`, reduced to what it
+refused. -/
+private def refused (e : String) : Option (List (String × Reason)) :=
+  (parseAs 1 s!"(defsrc a)\n(deflayer base {e})").toOption.map
+    (fun c => c.blocked.map (fun b => (b.form, b.reason)))
+
+-- The control for every guard below: a name in none of the lists is still an
+-- unknown atom and still stops the file loading, so `refused` saying `some`
+-- means something.
+#guard refused "nosuchform" == none
+#guard refused "(nosuchform x)" == none
+
+-- Needs a history: `rpt` repeats the last action, and the dynamic macros replay
+-- a recording of one.  Nothing in `St` remembers either.
+#guard refused "rpt" == some [("rpt", .history)]
+#guard refused "rpt-any" == some [("rpt-any", .history)]
+#guard refused "dynamic-macro-record-stop" == some [("dynamic-macro-record-stop", .history)]
+#guard refused "(dynamic-macro-record 1)" == some [("dynamic-macro-record", .history)]
+#guard refused "(dynamic-macro-play 1)" == some [("dynamic-macro-play", .history)]
+
+-- `fork` and `switch` look like present-tense tests of what is held and are
+-- not: kanata answers them against its own output state.  A clock would not
+-- help, which is why they are not filed with `tap-hold`.
+#guard refused "(fork a b (c))" == some [("fork", .history)]
+#guard refused "(switch (a) b break)" == some [("switch", .history)]
+
+-- Needs a clock: a sequence leader's first obligation is the timeout.
+#guard refused "sldr" == some [("sldr", .clock)]
+#guard refused "scnl" == some [("scnl", .clock)]
+
+-- Needs the world: a pointer is no more part of a keyboard than `lrld`'s file
+-- is, and no `Code` could carry a click out.
+#guard refused "mlft" == some [("mlft", .world)]
+#guard refused "mwu" == some [("mwu", .world)]
+#guard refused "(mwheel-up 50 120)" == some [("mwheel-up", .world)]
+#guard refused "(movemouse-up 1 1)" == some [("movemouse-up", .world)]
+#guard refused "(setmouse 100 100)" == some [("setmouse", .world)]
+
+-- The whole set, asserted as "records exactly one refusal" rather than one
+-- guard each, because the interesting property is that none of them is an
+-- unknown atom any more.
+#guard [ "rpt", "repeat", "rpt-key", "rpt-any", "sldr", "scnl"
+       , "mlft", "mouseleft", "mrgt", "mmid", "mbck", "mfwd"
+       , "mltp", "mrtp", "mmtp", "mftp", "mbtp"
+       , "mwu", "mwd", "mwl", "mwr", "mvmt"
+       , "dynamic-macro-record-stop"
+       , "(fork a b (c))", "(switch (a) b break)"
+       , "(dynamic-macro-record 1)", "(dynamic-macro-play 1)"
+       , "(dynamic-macro-record-stop-truncate 1)"
+       , "(mwheel-down 50 120)", "(mwheel-accel-up 1 2 3 4)"
+       , "(movemouse-left 1 1)", "(movemouse-accel-right 1 1 1 1)"
+       , "(movemouse-speed 50)", "(setmouse 1 1)" ].all
+  fun e => (refused e).map (·.length) == some 1
+
+-- The mouse names are `Code`s too, and in `defsrc` that is what they are.  The
+-- action table runs first and `defsrc` does not consult it, which is kanata's
+-- own reading of the same atom twice.
+#guard ((parseAs 1 "(defsrc mlft)\n(deflayer base _)").toOption.bind
+  (fun c => resolveAt? c {} 0)).map names == some ["mlft"]
+
+-- Pressing one is the same named refusal a `tap-hold` is.
+#guard (match (parseAs 1 "(defsrc a)\n(deflayer base mlft)") with
+        | .ok c => (match runIx c {} [(.down, 0)] with | .error m => m | .ok _ => "")
+        | .error _ => "")
+  == "position 0 resolves to mlft, which this evaluator does not model"
 
 -- An unknown atom is a hard error: a typo must never be skipped.
 #guard (parseAs 1 "(defsrc a)\n(deflayer base nosuchkey)").toOption == none

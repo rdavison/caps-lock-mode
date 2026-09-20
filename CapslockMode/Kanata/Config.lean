@@ -22,8 +22,9 @@ rather than in a plan nobody will read again.
    which is also what kanata's own `MultipleKeyCodes` does with them.
 
 The costs, stated rather than hidden: `(multi a b)` and `(multi b a)` survive
-only as the order of `keys`, and a `multi` holding two `layer-switch`es keeps
-the last.  Neither is exercised by any config here.
+only as the order of `keys`, a `multi` holding two `layer-switch`es keeps the
+last, and a `use-defsrc` inside a `multi` always lands after the other codes
+rather than where it was written.  None is exercised by any config here.
 
 ## Transparency is not a field
 
@@ -57,6 +58,21 @@ structure Action where
   hold : List Nat := []
   /-- A new base layer, applied on press and surviving the release. -/
   switch : Option Nat := none
+  /-- `use-defsrc`: also press whatever `defsrc` says at *this* position.
+
+  A flag and not a `Code`, because the answer depends on where the action is
+  used and an alias is shared by every position that names it.  `Layer.resolve`
+  is the only thing that ever clears it -- see `Layer.expandSrc`. -/
+  src : Bool := false
+  /-- `unicode`: characters typed outright, in order.
+
+  Deliberately *not* folded into `keys`.  A `Code` is a position that goes down
+  and comes up, and `release` gives every code in `keys` back; a character has
+  no release to give, so putting `é` there would make letting go of the key
+  un-type it.  So `press` does not emit these, and a caller that can type text
+  reads them off the resolved action -- which is exactly the seam a `Machine`
+  integration has to fill anyway, since `CapslockMode.Key` has no `é` either. -/
+  text : List Char := []
   /-- Forms recognised but not modelled.  Non-empty means pressing this is an
   error naming the form, rather than a silently wrong keystroke. -/
   blocked : List String := []
@@ -67,6 +83,8 @@ def Action.merge (a b : Action) : Action :=
   { keys := a.keys ++ b.keys
   , hold := a.hold ++ b.hold
   , switch := match b.switch with | some i => some i | none => a.switch
+  , src := a.src || b.src
+  , text := a.text ++ b.text
   , blocked := a.blocked ++ b.blocked }
 
 /-- One `deflayer`.  `none` at a position is `_`. -/
@@ -75,7 +93,28 @@ structure Layer (n : Nat) where
   acts : Vector (Option Action) n
   deriving DecidableEq, Repr, Inhabited
 
-/-- A form this evaluator recognised and refused, and where it was written.
+/-- Why a form is refused.
+
+Three and not one, because "unsupported" is the least useful thing this
+evaluator could say.  The three are the three different futures: `clock` is
+fixed by giving `InputEvent` a timestamp, `history` by giving the evaluator a
+memory of what it has already emitted, and `world` by nothing in this project at
+all -- it is the reason that says *do not wait for a later phase*. -/
+inductive Reason where
+  /-- Decides by how long a key was held or how soon the next one came. -/
+  | clock
+  /-- Decides by what was typed before, which this evaluator does not keep. -/
+  | history
+  /-- Wants something outside the keyboard: a file, or a pointer. -/
+  | world
+  deriving DecidableEq, Repr, Inhabited
+
+def Reason.describe : Reason → String
+  | .clock => "needs a clock"
+  | .history => "needs a history this evaluator does not keep"
+  | .world => "needs the world outside the keyboard"
+
+/-- A form this evaluator recognised and refused, where it was written, and why.
 
 Kept as a record rather than a string so a test can assert the exact set
 without depending on how an error message is phrased. -/
@@ -84,9 +123,13 @@ structure Blocked where
   form : String
   /-- `"top level"`, `"alias @grv-mode"`, `"deflayer layers"`. -/
   site : String
+  /-- Filled in by `reasonOf` at the one place each `Blocked` is built, so the
+  reason cannot drift from the list the form is in. -/
+  reason : Reason
   deriving DecidableEq, Repr, Inhabited
 
-def Blocked.describe (b : Blocked) : String := s!"{b.form} in {b.site}"
+def Blocked.describe (b : Blocked) : String :=
+  s!"{b.form} in {b.site} ({b.reason.describe})"
 
 /-- A whole config, `n` positions wide. -/
 structure Cfg (n : Nat) where
@@ -128,11 +171,22 @@ def Cfg.layerIx? (cfg : Cfg n) (name : String) : Option Nat :=
 def pos? (n : Nat) (i : Nat) : Option (Fin n) :=
   if h : i < n then some ⟨i, h⟩ else none
 
-/-! ## Forms this evaluator refuses, and why they are three lists and not one -/
+/-! ## Forms this evaluator refuses, and why they are three lists and not one
+
+The lists are by *reason*, not by position.  A form that kanata only accepts in
+one of the two positions -- `(tap-hold ...)` as a list, `sldr` as a bare atom --
+is recorded as unmodelled in either, rather than as the syntax error kanata
+reports for the wrong one.  Splitting each list in two would buy only that
+distinction, and it is not worth having: the config does not run here either
+way, and "needs a clock" is the more useful half of the answer. -/
 
 /-- Needs a clock.  Every one of these decides what it does by how long a key
 was held or how soon the next one came, and nothing in this phase has a
-timestamp to decide with. -/
+timestamp to decide with.
+
+`sldr` and `scnl` are here rather than with the history forms because a sequence
+leader's first obligation is the sequence *timeout*; that it also has to
+remember the sequence so far is the second problem, not the first. -/
 def clockForms : List String :=
   [ "tap-hold", "tap-hold-press", "tap-hold-release"
   , "tap-hold-press-timeout", "tap-hold-release-timeout"
@@ -141,18 +195,72 @@ def clockForms : List String :=
   , "one-shot-press-pcancel", "one-shot-release-pcancel"
   , "tap-dance", "tap-dance-eager"
   , "macro", "macro-repeat", "macro-release-cancel", "macro-repeat-release-cancel"
-  , "caps-word", "caps-word-custom" ]
+  , "caps-word", "caps-word-custom"
+  , "sldr", "scnl" ]
+
+/-- Needs a history.  Each of these answers a question about what already
+happened, and `St` remembers only which positions are down and what their press
+resolved to -- deliberately, because that is all `release` needs.
+
+`fork` and `switch` look like present-tense tests of what is held, and are not:
+kanata answers them against its own output state, which is the press history
+condensed, and `switch`'s `key-timing` conditions want the clock on top.  Giving
+them the clock reason would point at the wrong phase. -/
+def historyForms : List String :=
+  [ "rpt", "rpt-any", "rpt-key", "repeat"
+  , "fork", "switch"
+  , "dynamic-macro-record", "dynamic-macro-play"
+  , "dynamic-macro-record-stop", "dynamic-macro-record-stop-truncate" ]
 
 /-- Needs a world.  `lrld` is perfectly timeless -- it just re-reads a file, and
-a pure evaluator has no file.  Kept apart from `clockForms` because giving it
-the clock reason would be a lie, and phase 3 will not fix it. -/
+a pure evaluator has no file.  The mouse is the same shape of problem with a
+different noun: a pointer is no more part of a keyboard than a file is, and
+there is no `Code` a click could be written as on the way out.
+
+Kept apart from `clockForms` because giving these the clock reason would be a
+lie, and phase 3 will not fix any of them.
+
+Note that the *names* `mlft`, `mwu`, `mvmt` and the rest are perfectly good
+`Code`s -- kanata's `defsrc` takes them as input positions, and `Keys.lean`
+parses them.  It is only in action position that they are refused, which is why
+`parseAtom` consults this list before the key table, exactly as kanata's
+`parse_action_atom` runs before its `str_to_oscode`. -/
 def worldForms : List String :=
-  ["lrld", "lrld-next", "lrnx", "lrld-prev", "lrpv"]
+  [ "lrld", "lrld-next", "lrnx", "lrld-prev", "lrpv"
+  , "mlft", "mouseleft", "mrgt", "mouseright", "mmid", "mousemid"
+  , "mfwd", "mouseforward", "mbck", "mousebackward"
+  , "mltp", "mousetapleft", "mrtp", "mousetapright", "mmtp", "mousetapmid"
+  , "mftp", "mousetapforward", "mbtp", "mousetapbackward"
+  , "mwu", "mousewheelup", "mwd", "mousewheeldown"
+  , "mwl", "mousewheelleft", "mwr", "mousewheelright"
+  , "mvmt", "mousemovement"
+  , "mwheel-up", "mwheel-down", "mwheel-left", "mwheel-right"
+  , "mwheel-accel-up", "mwheel-accel-down", "mwheel-accel-left", "mwheel-accel-right"
+  , "movemouse-up", "movemouse-down", "movemouse-left", "movemouse-right"
+  , "movemouse-accel-up", "movemouse-accel-down"
+  , "movemouse-accel-left", "movemouse-accel-right"
+  , "movemouse-speed", "setmouse" ]
 
 /-- Top-level blocks recognised and skipped whole.  All three are chord- or
 sequence-timing machinery. -/
 def blockedBlocks : List String :=
   ["defchordsv2", "defchordsv2-experimental", "defchords", "defseq"]
+
+/-- The reason a refused form is refused.
+
+Total, and the fall-through is `clock` because the two lists it stands for --
+`clockForms` and the chord/sequence `blockedBlocks` -- are the timing ones.  A
+form in none of the four never reaches here: nothing records a `Blocked` for a
+form it did not first find in one of them. -/
+def reasonOf (form : String) : Reason :=
+  if historyForms.contains form then .history
+  else if worldForms.contains form then .world
+  else .clock
+
+/-- Whether a form is refused at all, for the two parsers that have to ask
+before they consult the key table. -/
+def isBlockedForm (form : String) : Bool :=
+  clockForms.contains form || historyForms.contains form || worldForms.contains form
 
 /-- `_`, and the two Unicode spellings kanata also accepts for it. -/
 def isTransAtom (a : String) : Bool := a == "_" || a == "‗" || a == "≝"
@@ -207,16 +315,22 @@ private structure Ctx where
 
 /-- An atom in action position.
 
-The order is kanata's `parse_action_atom`, and it is load-bearing: the key table
-is consulted **before** the modifier-prefix parser, so a key whose name happens
-to start with `S-` would still be that key.  Getting this backwards is a cheap
-mistake with a very confusing symptom. -/
+The order is kanata's `parse_action_atom`, and both halves of it are
+load-bearing.  The action names come **before** the key table, which is what
+makes `mlft` a click here and the mouse button in `defsrc` -- the same atom,
+read twice, exactly as kanata reads it.  The key table then comes **before** the
+modifier-prefix parser, so a key whose name happens to start with `S-` would
+still be that key.  Getting either backwards is a cheap mistake with a very
+confusing symptom. -/
 private def parseAtom (ctx : Ctx) (a : String) : Except String (Action × List String) :=
   if isTransAtom a then
     .error "_ is only meaningful as a whole (deflayer) entry"
   else if isNoOpAtom a then
     .ok ({}, [])
-  else if worldForms.contains a then
+  else if a == "use-defsrc" then
+    -- No position here to resolve it against; `Layer.resolve` has one.
+    .ok ({ src := true }, [])
+  else if isBlockedForm a then
     .ok ({ blocked := [a] }, [a])
   else
     match Code.ofName? a with
@@ -237,6 +351,31 @@ private def parseAtom (ctx : Ctx) (a : String) : Except String (Action × List S
         else match Code.ofName? rest with
           | some c => .ok ({ keys := mods ++ [c] }, [])
           | none => .error s!"unknown key '{rest}' after the modifiers in {a}"
+
+private def hexDigit? (c : Char) : Option Nat :=
+  let n := c.toNat
+  if c.isDigit then some (n - '0'.toNat)
+  else if 'a'.toNat ≤ n && n ≤ 'f'.toNat then some (n - 'a'.toNat + 10)
+  else if 'A'.toNat ≤ n && n ≤ 'F'.toNat then some (n - 'A'.toNat + 10)
+  else none
+
+private def hexOfChars? : List Char → Option Nat
+  | [] => none
+  | cs => cs.foldlM (fun acc c => (hexDigit? c).map (fun d => acc * 16 + d)) 0
+
+/-- `(unicode é)` and `(unicode U+00E9)`, which kanata treats as the same thing.
+
+The round trip through `Char.ofNat` is the validity check: it is the identity on
+a codepoint a `Char` can hold and lands somewhere else on a surrogate or a value
+past `0x10FFFF`, so comparing the two rules those out without a second table. -/
+private def unicodeArg? (s : String) : Option Char :=
+  match s.toList with
+  | [c] => some c
+  | 'U' :: '+' :: ds | 'u' :: '+' :: ds => do
+    let n ← hexOfChars? ds
+    let c := Char.ofNat n
+    if c.toNat == n then some c else none
+  | _ => none
 
 private def layerArg (ctx : Ctx) (head : String) : List Sexp → Except String Nat
   | [.atom nm] =>
@@ -271,7 +410,14 @@ private partial def parseAction (ctx : Ctx) (e : Sexp) :
     else if head == "layer-switch" then do
       let i ← layerArg ctx head args
       .ok ({ switch := some i }, [])
-    else if clockForms.contains head then
+    else if head == "unicode" || head == "🔣" then
+      match args with
+      | [.atom a] | [.str a] =>
+        match unicodeArg? a with
+        | some c => .ok ({ text := [c] }, [])
+        | none => .error s!"({head} {a}): expected one character, or U+ and a hex codepoint"
+      | _ => .error s!"({head} ...) takes exactly one character"
+    else if isBlockedForm head then
       .ok ({ blocked := [head] }, [head])
     else
       .error s!"unknown action: ({head} ...)"
@@ -327,7 +473,8 @@ private def scanForm (sc : Scan) (e : Sexp) : Except String Scan := do
   | .list (.atom "deflayer" :: _) => .error "(deflayer ...) needs a layer name"
   | .list (.atom head :: _) =>
     if blockedBlocks.contains head then
-      .ok { sc with blocked := sc.blocked ++ [{ form := head, site := "top level" }] }
+      .ok { sc with blocked :=
+        sc.blocked ++ [{ form := head, site := "top level", reason := reasonOf head }] }
     else
       -- A typo must not be skipped.  `$var`, `deftemplate`, `defvar`,
       -- `deflocalkeys-*`, `defvirtualkeys` and `include` all land here, which
@@ -372,7 +519,8 @@ def parseRaw (input : String) : Except String Raw := do
       | .error m => .error s!"in alias @{nm}: {m}"
       | .ok (act, forms) =>
         .ok (acc ++ [(nm, act)],
-             bl ++ forms.map (fun f => { form := f, site := s!"alias @{nm}" }))
+             bl ++ forms.map (fun f =>
+               { form := f, site := s!"alias @{nm}", reason := reasonOf f }))
   let (aliases, aliasBlocked) ← sc.aliasForms.foldlM aliasStep
     (([] : List (String × Action)), ([] : List Blocked))
   let ctx : Ctx := { layerNames := names, aliases := aliases }
@@ -388,7 +536,8 @@ def parseRaw (input : String) : Except String Raw := do
     | .error m => .error m
     | .ok rs =>
       .ok (acc ++ [(nm, rs.map (·.1))],
-           bl ++ (rs.flatMap (·.2)).map (fun f => { form := f, site := s!"deflayer {nm}" }))
+           bl ++ (rs.flatMap (·.2)).map (fun f =>
+             { form := f, site := s!"deflayer {nm}", reason := reasonOf f }))
   let (layers, layerBlocked) ← sc.layerForms.foldlM layerStep
     (([] : List (String × List (Option Action))), ([] : List Blocked))
   return { src := srcCodes, layers := layers, options := sc.options
