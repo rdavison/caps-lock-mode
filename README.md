@@ -51,9 +51,28 @@ suite; a failing test is a failing build.
 ./scripts/check-axioms.sh     # confirm no theorem leans on a `sorry`
 ```
 
-The macOS driver (`drivers/quartz_bridge.swift`) has **not been run on real
-hardware**: it is written against the documented CoreGraphics API, and the Lean
-side it talks to is tested, but expect to fix something the first time.
+To watch it work before trusting it with your keyboard:
+
+```sh
+./scripts/monitor.sh          # builds, checks Accessibility, opens the monitor
+```
+
+The window opens **disarmed** -- nothing is intercepted until you press Start --
+and shows every event the tap sees, with what the machine did to it:
+
+```
+ dir  key       did     mode          emitted
+ down d         pass    insert        d
+ down caps      hold    normal
+ down 3         hold    normal 3
+ down j         rewrite normal        down down down
+```
+
+`pass` is a key handed straight back, `rewrite` one swallowed and replaced,
+`hold` one swallowed with nothing emitted yet. The modal key can be changed in
+the window and re-armed without restarting, which matters if another remapper
+(kanata, Karabiner) already owns Caps Lock. The red close button quits and
+restores the keyboard.
 
 ## Try it without touching your keyboard
 

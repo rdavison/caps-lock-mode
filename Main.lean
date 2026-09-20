@@ -11,6 +11,7 @@ driver such as `drivers/evdev_bridge.py` connects it to a real keyboard.
 -/
 import CapslockMode.Machine
 import CapslockMode.Protocol
+import CapslockMode.Monitor
 import CapslockMode.Screen
 
 open CapslockMode
@@ -29,6 +30,8 @@ structure Opts where
   wire : Wire := .raw
   text : String := "the quick brown fox\njumps over the lazy dog\nand then takes a nap"
   verbose : Bool := false
+  /-- Interleave `mon ...` lines describing each event, for a driver to display. -/
+  monitor : Bool := false
   deriving Inhabited
 
 def usage : String :=
@@ -50,8 +53,17 @@ OPTIONS:
   --no-esc            do not let Esc return to normal mode from insert
   --text <string>     buffer contents for demo/trace
   --verbose           log mode changes on stderr
+  --monitor           also emit `mon ...` lines describing each event, for a driver
 
 SCRIPTS use vim key notation: 'ihello<Esc>dd', '<Caps>3jdw', '<C-r>'."
+
+/-- A toggle key as a user spells it: a name (`caps`, `f18`, `esc`) or, for
+`--wire quartz`, a bare virtual keycode.  Shared by the `--toggle` flag and the
+`toggle` command, so the two cannot drift. -/
+def parseToggle? (k : String) : Option PhysKey :=
+  let byCode : Option PhysKey :=
+    if !k.isEmpty && k.all Char.isDigit then Quartz.physOf? (UInt16.ofNat k.toNat!) else none
+  parsePhysKey? k <|> byCode
 
 /-- Parse the options that may follow a subcommand. -/
 partial def parseOpts (args : List String) (o : Opts) : Except String (Opts × List String) :=
@@ -67,10 +79,7 @@ partial def parseOpts (args : List String) (o : Opts) : Except String (Opts × L
     | "quartz" | "mac" | "macos" => parseOpts rest { o with wire := .quartz }
     | _ => .error s!"unknown wire format: {n} (try raw or quartz)"
   | "--toggle" :: k :: rest =>
-    -- a name (`caps`, `f18`) or, for `--wire quartz`, a bare virtual keycode
-    let byCode : Option PhysKey :=
-      if !k.isEmpty && k.all Char.isDigit then Quartz.physOf? (UInt16.ofNat k.toNat!) else none
-    match parsePhysKey? k <|> byCode with
+    match parseToggle? k with
     | some pk => parseOpts rest { o with cfg := { o.cfg with toggleKey := pk } }
     | none => .error s!"unknown key: {k}"
   | "--max-count" :: n :: rest =>
@@ -81,6 +90,7 @@ partial def parseOpts (args : List String) (o : Opts) : Except String (Opts × L
   | "--start-normal" :: rest => parseOpts rest { o with cfg := { o.cfg with startMode := .normal } }
   | "--no-esc" :: rest => parseOpts rest { o with cfg := { o.cfg with escapeToNormal := false } }
   | "--verbose" :: rest => parseOpts rest { o with verbose := true }
+  | "--monitor" :: rest => parseOpts rest { o with monitor := true }
   | a :: rest =>
     if a.startsWith "--" then .error s!"unknown option: {a}"
     else do
@@ -107,6 +117,24 @@ partial def runQuartz (o : Opts) (st : State) (fin fout : Quartz.Flags) : IO Uni
     stdout.putStrLn s!"# mode: {st.describe}"
     stdout.flush
     runQuartz o st fin fout
+  else if trimmed.startsWith "toggle" then
+    -- Rebinding resets the machine: changing the key that leaves normal mode
+    -- while sitting in normal mode would otherwise strand the keyboard.
+    match trimmed.splitOn " " with
+    | ["toggle", k] =>
+      match parseToggle? k with
+      | some pk =>
+        let o := { o with cfg := { o.cfg with toggleKey := pk } }
+        stdout.putStrLn s!"# toggle: {pk.name}"
+        if o.monitor then stdout.putStrLn (Monitor.stateLine o.cfg.start)
+        stdout.flush
+        runQuartz o o.cfg.start fin fout
+      | none =>
+        stderr.putStrLn s!"# unknown key: {k}"
+        runQuartz o st fin fout
+    | _ =>
+      stderr.putStrLn s!"# usage: toggle <key>"
+      runQuartz o st fin fout
   else match Quartz.parseLine? trimmed with
     | none =>
       stderr.putStrLn s!"# ignored: {trimmed}"
@@ -117,6 +145,10 @@ partial def runQuartz (o : Opts) (st : State) (fin fout : Quartz.Flags) : IO Uni
       let mut fout := fout
       for iev in evs do
         let (st', out) := step o.cfg st iev
+        if o.monitor then
+          stdout.putStrLn (Monitor.line { input := iev, state := st', out := out })
+          if st'.describe != st.describe then
+            stdout.putStrLn (Monitor.stateLine st')
         st := st'
         for qe in Quartz.encodeFrom fout out do
           stdout.putStrLn qe.line
@@ -131,7 +163,23 @@ partial def runFilter (o : Opts) (st : State) : IO Unit := do
   let stderr ← IO.getStderr
   let line ← stdin.getLine
   if line.isEmpty then return ()          -- EOF
-  match parseLine? line with
+  if line.trim.startsWith "toggle" then
+    match line.trim.splitOn " " with
+    | ["toggle", k] =>
+      match parseToggle? k with
+      | some pk =>
+        let o := { o with cfg := { o.cfg with toggleKey := pk } }
+        stdout.putStrLn s!"# toggle: {pk.name}"
+        if o.monitor then stdout.putStrLn (Monitor.stateLine o.cfg.start)
+        stdout.flush
+        runFilter o o.cfg.start
+      | none =>
+        stderr.putStrLn s!"# unknown key: {k}"
+        runFilter o st
+    | _ =>
+      stderr.putStrLn s!"# usage: toggle <key>"
+      runFilter o st
+  else match parseLine? line with
   | none =>
     stderr.putStrLn s!"# ignored: {line.trim}"
     runFilter o st
@@ -146,6 +194,10 @@ partial def runFilter (o : Opts) (st : State) : IO Unit := do
     runFilter o o.cfg.start
   | some (.event ev) =>
     let (st', out) := step o.cfg st ev
+    if o.monitor then
+      stdout.putStrLn (Monitor.line { input := ev, state := st', out := out })
+      if st'.describe != st.describe then
+        stdout.putStrLn (Monitor.stateLine st')
     for e in out do
       stdout.putStrLn e.line
     stdout.flush
@@ -176,10 +228,7 @@ def trace (o : Opts) (script : String) : IO Unit := do
     let (st', out) := step o.cfg st ev
     sc := sc.applyAll out
     if ev.dir == .down then
-      let name := match ev.key with
-        | .key k => (Chord.name { mods := ev.mods, key := k })
-        | k => k.name
-      IO.println s!"{pad name 8}{pad st'.describe 14}{renderEvents out}"
+      IO.println (Monitor.row (Monitor.inputName ev) st' out)
     st := st'
   IO.println ""
   for l in sc.render.splitOn "\n" do
@@ -210,6 +259,9 @@ def main (args : List String) : IO UInt32 := do
     | .ok (o, positional) =>
       match cmd, positional with
       | "run", _ =>
+        if o.monitor then
+          IO.println Monitor.headerLine
+          IO.println (Monitor.stateLine o.cfg.start)
         match o.wire with
         | .raw => runFilter o o.cfg.start
         | .quartz => runQuartz o o.cfg.start {} {}

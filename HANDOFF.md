@@ -19,10 +19,11 @@ About 2,900 lines of Lean, a Python driver, a Swift driver, and packaging.
 | The promises | `CapslockMode/Invariants.lean` | 37 theorems |
 | macOS event model | `CapslockMode/Backend/Quartz.lean` | 12 theorems |
 | Wire formats, key notation | `CapslockMode/Protocol.lean` | Two wires: `raw`, `quartz` |
+| Monitor rows | `CapslockMode/Monitor.lean` | What a driver displays; pure |
 | Model text field | `CapslockMode/Screen.lean` | Demo and test oracle only |
 | CLI | `Main.lean` | `run`, `demo`, `trace`, `keys` |
 | Linux driver | `drivers/evdev_bridge.py` | Written, **never run** |
-| macOS driver | `drivers/quartz_bridge.swift` | Compiles clean; **never run** |
+| macOS driver | `drivers/quartz_bridge.swift` | **Run on real hardware**; intercepts and rebinds |
 | Packaging | `packaging/homebrew/`, `.github/workflows/release.yml` | Blocked on a tap repo |
 
 ## Verification status — read this before trusting anything
@@ -52,8 +53,17 @@ and the Lean side they talk to is tested, but whoever runs them first should
 expect to fix something. Do not let the proofs create false confidence here: the
 proofs are about the machine, and the drivers are the part that is unproven.
 
-**The Swift driver compiles.** First build on macOS 26.5.2 / arm64 with Swift
-6.3.3 (Command Line Tools, no full Xcode), 2026-09-19:
+**The Swift driver runs.** As of 2026-09-19 it has been run against a real
+keyboard on macOS 26.5.2 / arm64: the tap installs, events arrive, the monitor
+window shows them being classified, and the modal key can be rebound at runtime
+and re-armed. That is the first end-to-end confirmation that the Lean machine
+and a real keyboard talk to each other.
+
+Still unconfirmed on hardware: that vi commands produce the right edits in a
+real text field (the `Screen` oracle covers this in tests, not in an app), and
+key repeat, which is known broken by design -- see Open work.
+
+It also compiles clean. First build, same machine, same day:
 
 ```sh
 swiftc -O drivers/quartz_bridge.swift -o .lake/build/bin/capslockmode-quartz
@@ -68,8 +78,11 @@ someone passes `-swift-version 6`, those globals are where it will break.
 `otool -L` shows only `/usr/lib` and `/System` links, so it passes the gate in
 `release.yml`. `--check` correctly reports `not trusted` and exits 1.
 
-Still unrun: no event tap has ever been installed, and no keystroke has ever
-been through it.
+The driver was first exercised through `scripts/monitor.sh`, which is the
+supported way to launch it: it rebuilds only when the source changed (an ad-hoc
+signed binary gets a new code identity on every rebuild, which silently voids
+the Accessibility grant), warns when the identity moved, and waits for the grant
+rather than opening a window that cannot see the keyboard.
 
 ## Building it somewhere new
 
@@ -147,7 +160,13 @@ unfolding a helper inside a big bash.
 
 **Code, roughly in order of value:**
 
-* **Run the drivers.** The single highest-value next step, on either platform.
+* **Run the Linux driver.** `drivers/evdev_bridge.py` has still never been run.
+  The macOS side is done (see above), so this is what is left of "run the
+  drivers", and it is still the highest-value unknown on that platform.
+* **Confirm the edits, not just the interception.** macOS shows events arriving
+  and being classified; nobody has yet checked that `dd` in a real text field
+  deletes the line it should. The `Screen` oracle asserts this in tests, which
+  is not the same as a browser or an IDE agreeing.
 * **Key repeat on macOS.** The tap swallows the original event and re-posts a
   replacement, and posted events do not auto-repeat, so holding a key types it
   once. The fix is a synchronous answer inside the tap callback (returning the

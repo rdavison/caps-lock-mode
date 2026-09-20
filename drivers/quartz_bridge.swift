@@ -22,6 +22,7 @@
 import Foundation
 import CoreGraphics
 import ApplicationServices
+import AppKit
 
 // MARK: - Options
 
@@ -31,6 +32,7 @@ struct Options {
     var remap = true
     var dryRun = false
     var check = false
+    var monitor = false
 }
 
 func parseArgs() -> Options {
@@ -43,6 +45,7 @@ func parseArgs() -> Options {
         case "--no-remap": o.remap = false
         case "--dry-run": o.dryRun = true
         case "--check": o.check = true
+        case "--monitor", "--gui": o.monitor = true
         case "--help", "-h":
             print("""
             capslockmode-quartz - macOS keyboard driver for CapslockMode
@@ -52,6 +55,7 @@ func parseArgs() -> Options {
               --no-remap        do not remap Caps Lock to F18 with hidutil
               --dry-run         print what would be injected instead of injecting it
               --check           report Accessibility permission status and exit
+              --monitor         open a window showing intercepted events (starts disarmed)
             """)
             exit(0)
         default:
@@ -71,8 +75,74 @@ func parseArgs() -> Options {
 
 let opts = parseArgs()
 
+// MARK: - The monitor's buffer
+//
+// Everything the window shows arrives here first.  The point of the indirection
+// is the tap callback: CoreGraphics switches off a tap that misses its deadline,
+// and the callback runs on the main thread -- the same thread that would draw
+// the window.  So nothing on the hot path is allowed to touch AppKit, or even to
+// dispatch to it; producers append under a lock and a timer drains them.
+
+final class LogBuffer {
+    private let lock = NSLock()
+    private var pending: [String] = []
+    private var state: String?
+    private var dropped = 0
+    private let cap = 8192
+
+    func append(_ s: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        // Drop the oldest rather than grow without bound: a wedged UI must not
+        // turn into a memory leak driven by the keyboard.
+        if pending.count >= cap {
+            pending.removeFirst()
+            dropped += 1
+        }
+        pending.append(s)
+    }
+
+    /// A `mon` line from the machine, with its prefix already removed.
+    func accept(_ s: String) {
+        if s.hasPrefix("state ") {
+            lock.lock()
+            state = String(s.dropFirst("state ".count))
+            lock.unlock()
+        } else if s.hasPrefix("row ") {
+            append(String(s.dropFirst("row ".count)))
+        } else if s.hasPrefix("header ") {
+            append(String(s.dropFirst("header ".count)))
+        } else {
+            append(s)
+        }
+    }
+
+    func drain() -> (lines: [String], state: String?, dropped: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        let l = pending, st = state, d = dropped
+        pending = []
+        state = nil
+        dropped = 0
+        return (l, st, d)
+    }
+}
+
+let logBuffer = LogBuffer()
+/// The toggle key and the remap are settings, not constants: with another
+/// remapper (kanata, Karabiner) already holding Caps Lock, the defaults are
+/// unusable and have to be changed without restarting.
+var currentToggle = opts.toggle
+var remapEnabled = opts.remap
+/// How many events the tap has handed to the machine.  Counted rather than
+/// logged, so the hot path allocates nothing: it is the one number that proves
+/// the tap is alive even when the machine is not answering.
+var eventsSeen = 0
+let machineErr = Pipe()
+
 func log(_ s: String) {
     FileHandle.standardError.write("\(s)\n".data(using: .utf8)!)
+    logBuffer.append(s)
 }
 
 // MARK: - Accessibility
@@ -129,19 +199,29 @@ func hidutil(_ json: String) -> Bool {
     return p.terminationStatus == 0
 }
 
+/// Whether we actually installed a mapping.  `hidutil --set {}` clears *every*
+/// user key mapping, not just ours, so a run that never remapped must not
+/// "restore" anything -- it would silently discard a mapping the user set.
+var remapApplied = false
+
 func applyRemap() {
-    guard opts.remap else { return }
+    guard remapEnabled else { return }
     let json = """
         {"UserKeyMapping":[{"HIDKeyboardModifierMappingSrc":\(capsLockUsage),\
         "HIDKeyboardModifierMappingDst":\(f18Usage)}]}
         """
-    if hidutil(json) { log("# Caps Lock remapped to F18") }
-    else { log("# hidutil remap failed; pass --no-remap and pick another --toggle") }
+    if hidutil(json) {
+        remapApplied = true
+        log("# Caps Lock remapped to F18")
+    } else {
+        log("# hidutil remap failed; pass --no-remap and pick another --toggle")
+    }
 }
 
 func clearRemap() {
-    guard opts.remap else { return }
+    guard remapApplied else { return }
     hidutil("{\"UserKeyMapping\":[]}")
+    remapApplied = false
 }
 
 // MARK: - The machine
@@ -153,13 +233,38 @@ let writeLock = NSLock()
 
 func startMachine() {
     machine.executableURL = URL(fileURLWithPath: opts.binary)
-    machine.arguments = ["run", "--wire", "quartz", "--platform", "mac", "--toggle", opts.toggle]
+    machine.arguments = ["run", "--wire", "quartz", "--platform", "mac", "--toggle", currentToggle]
+    if opts.monitor { machine.arguments?.append("--monitor") }
     machine.standardInput = toMachine
     machine.standardOutput = fromMachine
+    // Lean reports unparseable lines on stderr; in the GUI that is worth seeing
+    // rather than leaving on a terminal nobody is looking at.
+    if opts.monitor {
+        machine.standardError = machineErr
+        Thread.detachNewThread {
+            let h = machineErr.fileHandleForReading
+            while true {
+                let chunk = h.availableData
+                if chunk.isEmpty { break }
+                if let s = String(data: chunk, encoding: .utf8) {
+                    for l in s.split(separator: "\n") { logBuffer.append(String(l)) }
+                }
+            }
+        }
+    }
     machine.terminationHandler = { p in
         log("# capslockmode exited (\(p.terminationStatus)); stopping")
-        clearRemap()
-        exit(1)
+        // Headless, dying with the child is right: something else supervises us.
+        // With a window open it is not -- disarm, restore the keyboard, and stay
+        // up so the reason is still on screen. A Lean panic aborts, and `atexit`
+        // does not run on abort, so this is the only path that restores the
+        // remap in that case.
+        if opts.monitor {
+            DispatchQueue.main.async { monitorUI?.childDied(status: p.terminationStatus) }
+        } else {
+            clearRemap()
+            exit(1)
+        }
     }
     do {
         try machine.run()
@@ -169,12 +274,27 @@ func startMachine() {
     }
 }
 
-func send(_ line: String) {
+func sendLine(_ line: String) {
     writeLock.lock()
     defer { writeLock.unlock() }
     if let data = (line + "\n").data(using: .utf8) {
         toMachine.fileHandleForWriting.write(data)
     }
+}
+
+/// From the tap, so it counts towards the liveness number.
+func send(_ line: String) {
+    writeLock.lock()
+    eventsSeen += 1
+    writeLock.unlock()
+    sendLine(line)
+}
+
+/// Rebind the modal key on a running machine.  Lean resets its state when it
+/// accepts this, so it cannot strand you in normal mode with no way out.
+func applyToggle(_ k: String) {
+    currentToggle = k
+    if machineStarted { sendLine("toggle \(k)") }
 }
 
 // MARK: - Flags
@@ -259,6 +379,13 @@ func readLoop() {
             buffer = buffer[buffer.index(after: nl)...]
             guard let line = String(data: lineData, encoding: .utf8) else { continue }
             let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Monitor lines share this stream with injectable events and are told
+            // apart by prefix alone. They must be routed before the `#` check,
+            // which drops everything it does not recognise.
+            if trimmed.hasPrefix("mon ") {
+                logBuffer.accept(String(trimmed.dropFirst(4)))
+                continue
+            }
             if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
             inject(trimmed)
         }
@@ -302,11 +429,325 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
     }
 }
 
-// MARK: - Main
+// MARK: - Arming
+//
+// Arming is the dangerous half: from here on every keystroke in the session is
+// swallowed and only comes back if the machine answers. It is therefore its own
+// step, so a window can open and prove itself before anything is at risk.
 
-waitForTrust()
-applyRemap()
-startMachine()
+var tapSource: CFRunLoopSource?
+var machineStarted = false
+var armed = false
+
+func armTap() -> Bool {
+    let mask = (1 << CGEventType.keyDown.rawValue)
+             | (1 << CGEventType.keyUp.rawValue)
+             | (1 << CGEventType.flagsChanged.rawValue)
+
+    guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap,
+                                      place: .headInsertEventTap,
+                                      options: .defaultTap,
+                                      eventsOfInterest: CGEventMask(mask),
+                                      callback: callback,
+                                      userInfo: nil) else {
+        log("# could not create the event tap (Accessibility permission?)")
+        return false
+    }
+    eventTap = tap
+    let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+    tapSource = source
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+    CGEvent.tapEnable(tap: tap, enable: true)
+    return true
+}
+
+func disarmTap() {
+    if let tap = eventTap {
+        CGEvent.tapEnable(tap: tap, enable: false)
+        if let source = tapSource {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+        }
+        CFMachPortInvalidate(tap)
+    }
+    tapSource = nil
+    eventTap = nil
+}
+
+/// Take the keyboard.  The machine is started once and kept: it reads nothing
+/// while the tap is off, so disarming does not need to kill it.
+func arm() -> Bool {
+    applyRemap()
+    if !machineStarted {
+        startMachine()
+        machineStarted = true
+        Thread.detachNewThread(readLoop)
+    }
+    guard armTap() else {
+        clearRemap()
+        return false
+    }
+    armed = true
+    log("# armed (toggle: \(currentToggle))")
+    return true
+}
+
+/// Give the keyboard back, without quitting.
+func disarm() {
+    guard armed else { return }
+    disarmTap()
+    clearRemap()
+    armed = false
+    log("# disarmed; keyboard restored")
+}
+
+/// The only way out.  `terminationHandler` has to be cleared first or killing
+/// the child re-enters it and reports a deliberate quit as a failure.
+func quitCleanly() -> Never {
+    disarm()
+    machine.terminationHandler = nil
+    if machineStarted && machine.isRunning { machine.terminate() }
+    exit(0)
+}
+
+// MARK: - The window
+
+final class MonitorWindow: NSObject, NSWindowDelegate, NSApplicationDelegate {
+    private let window: NSWindow
+    private let textView: NSTextView
+    private let stateField: NSTextField
+    private let statusField: NSTextField
+    private let armButton: NSButton
+    private let toggleField: NSTextField
+    private let remapBox: NSButton
+    private let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+    private var timer: Timer?
+    private var lines: [String] = []
+    private let maxLines = 4000
+    /// Asking TCC whether we are trusted is a real lookup; the drain runs at
+    /// 20 Hz and does not need the answer that often.
+    private var trusted = false
+    private var trustChecked = Date.distantPast
+    private let accessButton = NSButton(title: "Accessibility...", target: nil, action: nil)
+
+    override init() {
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 560),
+                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                          backing: .buffered, defer: false)
+        window.title = "CapslockMode monitor"
+
+        let content = window.contentView!
+        let w = content.bounds.width, h = content.bounds.height
+
+        statusField = NSTextField(labelWithString: "")
+        statusField.frame = NSRect(x: 12, y: h - 30, width: w - 130, height: 18)
+        statusField.autoresizingMask = [.width, .minYMargin]
+
+        stateField = NSTextField(labelWithString: "")
+        stateField.frame = NSRect(x: 12, y: h - 52, width: w - 130, height: 18)
+        stateField.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)
+        stateField.autoresizingMask = [.width, .minYMargin]
+
+        armButton = NSButton(title: "Start", target: nil, action: nil)
+        armButton.bezelStyle = .rounded
+        armButton.frame = NSRect(x: w - 108, y: h - 44, width: 96, height: 30)
+        armButton.autoresizingMask = [.minXMargin, .minYMargin]
+
+        toggleField = NSTextField(string: currentToggle)
+        toggleField.frame = NSRect(x: 84, y: h - 80, width: 90, height: 22)
+        toggleField.autoresizingMask = [.minYMargin]
+
+        remapBox = NSButton(checkboxWithTitle: "Remap Caps Lock to F18 (hidutil)",
+                            target: nil, action: nil)
+        remapBox.frame = NSRect(x: 190, y: h - 78, width: 300, height: 20)
+        remapBox.state = remapEnabled ? .on : .off
+        remapBox.autoresizingMask = [.minYMargin]
+
+        accessButton.bezelStyle = .rounded
+        accessButton.frame = NSRect(x: w - 108, y: h - 78, width: 96, height: 24)
+        accessButton.autoresizingMask = [.minXMargin, .minYMargin]
+
+        let toggleLabel = NSTextField(labelWithString: "Modal key:")
+        toggleLabel.frame = NSRect(x: 12, y: h - 77, width: 70, height: 18)
+        toggleLabel.autoresizingMask = [.minYMargin]
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: w, height: h - 92))
+        scroll.hasVerticalScroller = true
+        scroll.autoresizingMask = [.width, .height]
+        scroll.borderType = .noBorder
+
+        textView = NSTextView(frame: scroll.contentView.bounds)
+        textView.isEditable = false
+        textView.isRichText = false
+        textView.font = font
+        textView.autoresizingMask = [.width]
+        textView.isVerticallyResizable = true
+        textView.textContainer?.widthTracksTextView = true
+        scroll.documentView = textView
+
+        super.init()
+
+        armButton.target = self
+        armButton.action = #selector(toggleArm)
+        toggleField.target = self
+        toggleField.action = #selector(toggleKeyChanged)
+        remapBox.target = self
+        remapBox.action = #selector(remapChanged)
+        accessButton.target = self
+        accessButton.action = #selector(openAccessibility)
+        content.addSubview(statusField)
+        content.addSubview(stateField)
+        content.addSubview(armButton)
+        content.addSubview(toggleLabel)
+        content.addSubview(toggleField)
+        content.addSubview(remapBox)
+        content.addSubview(accessButton)
+        content.addSubview(scroll)
+        window.delegate = self
+        window.center()
+    }
+
+    func present() {
+        refreshStatus()
+        stateField.stringValue = "machine: not started"
+        append(["Disarmed. Nothing is intercepted yet.",
+                "Press Start to install the event tap.",
+                "",
+                "If another remapper (kanata, Karabiner) already owns Caps Lock,",
+                "untick the remap and set Modal key to something it passes through",
+                "-- f13..f20 are the usual spares. Every key you press shows up",
+                "below under `key`, so you can arm, look, and rebind.",
+                ""])
+        window.makeKeyAndOrderFront(nil)
+        let t = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    /// Drain whatever the producers left, at a rate the window can draw.
+    private func tick() {
+        let (new, state, dropped) = logBuffer.drain()
+        if dropped > 0 { append(["... \(dropped) lines dropped ..."]) }
+        if !new.isEmpty { append(new) }
+        if let state = state { stateField.stringValue = "mode: \(state)" }
+        refreshStatus()
+    }
+
+    private func refreshStatus() {
+        if Date().timeIntervalSince(trustChecked) > 1.0 {
+            let now = isTrusted(prompting: false)
+            // A grant can be revoked, or go stale because the binary was
+            // rebuilt, while we are running. If that happens while armed the
+            // tap is already dead, so give the keyboard back rather than
+            // sitting there swallowing keys that will never come back.
+            if armed && !now && trusted {
+                append(["", "Accessibility was lost. Disarming so the keyboard keeps working.", ""])
+                disarm()
+            }
+            trusted = now
+            trustChecked = Date()
+        }
+        let trust = trusted ? "granted" : "NOT granted"
+        let state = armed ? "ARMED - keystrokes are being intercepted" : "disarmed"
+        statusField.stringValue = "\(state)   |   Accessibility: \(trust)   |   events seen: \(eventsSeen)"
+        armButton.title = armed ? "Stop" : "Start"
+        accessButton.isHidden = trusted
+    }
+
+    /// The grant is keyed to this binary's code identity, and an ad-hoc signed
+    /// binary gets a new one every rebuild -- so a stale entry looks present and
+    /// ticked while doing nothing. Re-ticking it does not help; it has to be
+    /// removed and re-added.
+    @objc func openAccessibility() {
+        let path = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.path
+        append(["", "Add this exact path under Privacy & Security -> Accessibility:",
+                "  " + path,
+                "If an entry for capslockmode-quartz is already there, REMOVE it first:",
+                "a rebuilt binary has a new identity and the old entry is dead.", ""])
+        NSWorkspace.shared.open(
+            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+    }
+
+    private func append(_ new: [String]) {
+        lines.append(contentsOf: new)
+        if lines.count > maxLines {
+            // Infrequent bulk trim rather than a per-line shuffle.
+            lines.removeFirst(lines.count - maxLines)
+            textView.string = lines.joined(separator: "\n") + "\n"
+        } else {
+            let chunk = new.joined(separator: "\n") + "\n"
+            textView.textStorage?.append(NSAttributedString(
+                string: chunk, attributes: [.font: font, .foregroundColor: NSColor.textColor]))
+        }
+        textView.scrollToEndOfDocument(nil)
+    }
+
+    @objc func toggleArm() {
+        if armed {
+            disarm()
+        } else {
+            guard isTrusted(prompting: true) else {
+                append(["Accessibility permission is needed before the tap can be installed.",
+                        "Add this binary under System Settings -> Privacy & Security -> Accessibility:",
+                        "  " + URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.path,
+                        "Then press Start again.", ""])
+                refreshStatus()
+                return
+            }
+            if !arm() {
+                append(["Could not arm. The tap was refused; nothing is intercepted.", ""])
+            }
+        }
+        refreshStatus()
+    }
+
+    /// Enter in the key field, or losing focus, rebinds.  Takes effect on a
+    /// running machine immediately, so you can hunt for a key that your other
+    /// remapper lets through without disarming.
+    @objc func toggleKeyChanged() {
+        let k = toggleField.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !k.isEmpty else {
+            toggleField.stringValue = currentToggle
+            return
+        }
+        applyToggle(k)
+        append(["modal key set to \(k)\(machineStarted ? "" : " (applies when armed)")"])
+    }
+
+    @objc func remapChanged() {
+        remapEnabled = (remapBox.state == .on)
+        if armed {
+            // Apply now rather than at the next arm, so the checkbox means what
+            // it says while the tap is live.
+            if remapEnabled { applyRemap() } else { clearRemap() }
+        }
+        append(["Caps Lock remap \(remapEnabled ? "enabled" : "disabled")"])
+    }
+
+    func childDied(status: Int32) {
+        disarm()
+        append(["", "The machine exited (status \(status)). Disarmed; your keyboard is back.", ""])
+        stateField.stringValue = "machine: exited (\(status))"
+        refreshStatus()
+    }
+
+    /// The red button. It is the escape hatch for a wedged keyboard, so it does
+    /// the full teardown rather than just closing a window.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        quitCleanly()
+    }
+
+    @objc func quitNow() {
+        quitCleanly()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
+}
+
+var monitorUI: MonitorWindow?
+
+// MARK: - Main
 
 for sig in [SIGINT, SIGTERM] {
     signal(sig) { _ in
@@ -316,26 +757,37 @@ for sig in [SIGINT, SIGTERM] {
 }
 atexit { clearRemap() }
 
-Thread.detachNewThread(readLoop)
+if opts.monitor {
+    let app = NSApplication.shared
+    // Without this a binary with no bundle gets `.prohibited`: no Dock icon, no
+    // focus, and no window ever appears.
+    app.setActivationPolicy(.regular)
 
-let mask = (1 << CGEventType.keyDown.rawValue)
-         | (1 << CGEventType.keyUp.rawValue)
-         | (1 << CGEventType.flagsChanged.rawValue)
+    let ui = MonitorWindow()
+    monitorUI = ui
+    app.delegate = ui
 
-guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap,
-                                  place: .headInsertEventTap,
-                                  options: .defaultTap,
-                                  eventsOfInterest: CGEventMask(mask),
-                                  callback: callback,
-                                  userInfo: nil) else {
-    log("# could not create the event tap (Accessibility permission?)")
-    clearRemap()
-    exit(1)
+    // A minimal menu, purely so Cmd-Q exists as a second way out.
+    let menu = NSMenu()
+    let appItem = NSMenuItem()
+    let appMenu = NSMenu()
+    appMenu.addItem(withTitle: "Quit CapslockMode monitor",
+                    action: #selector(MonitorWindow.quitNow), keyEquivalent: "q")
+    appMenu.items.forEach { $0.target = ui }
+    appItem.submenu = appMenu
+    menu.addItem(appItem)
+    app.mainMenu = menu
+
+    ui.present()
+    app.activate(ignoringOtherApps: true)
+    app.run()
+} else {
+    // Headless: unchanged behaviour, for `brew services`.
+    waitForTrust()
+    guard arm() else {
+        clearRemap()
+        exit(1)
+    }
+    log("# capslockmode-quartz running (toggle: \(currentToggle))")
+    CFRunLoopRun()
 }
-eventTap = tap
-
-let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-CGEvent.tapEnable(tap: tap, enable: true)
-log("# capslockmode-quartz running (toggle: \(opts.toggle))")
-CFRunLoopRun()

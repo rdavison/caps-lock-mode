@@ -124,7 +124,8 @@ def keyCode? : Key → Option KeyCode
   | .f 1 => some 122 | .f 2 => some 120 | .f 3 => some 99  | .f 4 => some 118
   | .f 5 => some 96  | .f 6 => some 97  | .f 7 => some 98  | .f 8 => some 100
   | .f 9 => some 101 | .f 10 => some 109 | .f 11 => some 103 | .f 12 => some 111
-  | .f 17 => some 64 | .f 18 => some 79 | .f 19 => some 80
+  | .f 13 => some 105 | .f 14 => some 107 | .f 15 => some 113 | .f 16 => some 106
+  | .f 17 => some 64 | .f 18 => some 79 | .f 19 => some 80 | .f 20 => some 90
   | .f _ => none
 
 /-- The reverse direction, for events arriving from a tap. -/
@@ -149,8 +150,10 @@ def keyOf? (c : KeyCode) : Option Key :=
   else if c == 98 then some (.f 7) else if c == 100 then some (.f 8)
   else if c == 101 then some (.f 9) else if c == 109 then some (.f 10)
   else if c == 103 then some (.f 11) else if c == 111 then some (.f 12)
+  else if c == 105 then some (.f 13) else if c == 107 then some (.f 14)
+  else if c == 113 then some (.f 15) else if c == 106 then some (.f 16)
   else if c == 64 then some (.f 17) else if c == 79 then some (.f 18)
-  else if c == 80 then some (.f 19)
+  else if c == 80 then some (.f 19) else if c == 90 then some (.f 20)
   else
     let letters : List (KeyCode × Char) :=
       [(0,'a'),(1,'s'),(2,'d'),(3,'f'),(4,'h'),(5,'g'),(6,'z'),(7,'x'),(8,'c'),(9,'v'),
