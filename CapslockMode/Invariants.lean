@@ -16,11 +16,63 @@ it safe to leave switched on.
   a storm of synthetic keystrokes.
 * `operator_progress` / `textObj_progress` — a half-typed command always
   resolves; the machine never quietly swallows your keyboard.
+
+Some of these are promises about *vi*, and some are promises about being a
+keyboard filter at all.  The second kind are stated twice: once about
+`prelude`, where they are true of every backend, and once about `step`, which
+is the form the README quotes.
 -/
 import CapslockMode.Balance
 import CapslockMode.Machine
 
 namespace CapslockMode
+
+/-! ## The guards, before any backend sees a key
+
+`prelude` runs three checks that have nothing to do with vi: an injected event
+goes straight back out, a key-up is forwarded exactly when its key-down was,
+and the mode key is consumed.  Proving them here rather than about `step` is
+the difference between promising them for vi and promising them for whatever
+backend is bound — which is the whole reason the guards were hoisted.  The
+`step` forms below are then corollaries, via `step_of_handled`. -/
+
+/-- **No feedback loop.**  An event CapslockMode injected itself is resolved by
+the prelude, so it never reaches a backend to be read as a command. -/
+theorem prelude_no_feedback (cfg : Config) (st : State) (ev : InputEvent)
+    (h : ev.injected = true) : prelude cfg st ev = .handled st [ev.passthrough] := by
+  rw [prelude, if_pos (by simp [h])]
+
+/-- **No stray releases.**  A key-up whose key-down was not forwarded is
+swallowed before dispatch, so no backend is in a position to turn it into
+output. -/
+theorem prelude_up_only_if_pressed (cfg : Config) (st : State) (ev : InputEvent)
+    (hdir : ev.dir = .up) (hinj : ev.injected = false) (hn : ev.key ∉ st.down) :
+    prelude cfg st ev = .handled st [] := by
+  rw [prelude, if_neg (by simp [hinj]), hdir]
+  simp [hn]
+
+/-- The mode key is the prelude's, not the backend's: it flips the mode,
+forgets any half-typed command, types nothing, and is never dispatched. -/
+theorem prelude_toggle_down (cfg : Config) (st : State) (mods : Mods) :
+    prelude cfg st { dir := .down, key := cfg.toggleKey, mods := mods }
+      = .handled st.toggleMode [] := by
+  simp [prelude]
+
+/-- Releasing it does nothing at all. -/
+theorem prelude_toggle_up (cfg : Config) (st : State) (mods : Mods)
+    (hn : cfg.toggleKey ∉ st.down) :
+    prelude cfg st { dir := .up, key := cfg.toggleKey, mods := mods } = .handled st [] := by
+  simp [prelude, hn]
+
+/-- **Caps Lock never types anything**, whichever backend is bound: both
+directions are resolved by the prelude, and both emit nothing. -/
+theorem prelude_capsLock_silent (cfg : Config) (st : State) (dir : Dir) (mods : Mods)
+    (hn : cfg.toggleKey ∉ st.down) :
+    ∃ st', prelude cfg st { dir := dir, key := cfg.toggleKey, mods := mods }
+      = .handled st' [] := by
+  cases dir
+  · exact ⟨_, prelude_toggle_down cfg st mods⟩
+  · exact ⟨_, prelude_toggle_up cfg st mods hn⟩
 
 /-! ## No stuck keys -/
 
@@ -33,7 +85,7 @@ presses, it releases, and it never presses one that is already down. -/
 theorem step_balanced (cfg : Config) (st : State) (ev : InputEvent)
     (hm : st.mode.isInsert = false) (hdir : ev.dir = .down) (hinj : ev.injected = false)
     (ht : (ev.key == cfg.toggleKey) = false) : Balanced (step cfg st ev).2 := by
-  rw [step, if_neg (by simp [hinj]), hdir]
+  rw [step_def, if_neg (by simp [hinj]), hdir]
   simp only [ht, Bool.false_eq_true, if_false, hm]
   split
   · exact balanced_nil
@@ -45,8 +97,7 @@ never see a release for a key they never saw pressed. -/
 theorem up_only_if_pressed (cfg : Config) (st : State) (ev : InputEvent)
     (hdir : ev.dir = .up) (hinj : ev.injected = false) (hn : ev.key ∉ st.down) :
     (step cfg st ev).2 = [] := by
-  rw [step, if_neg (by simp [hinj]), hdir]
-  simp [hn]
+  rw [step_of_handled (prelude_up_only_if_pressed cfg st ev hdir hinj hn)]
 
 /-- **No stuck keys, the other half.**  A press that is forwarded is recorded,
 so its release will be forwarded too — even if Caps Lock is pressed in
@@ -56,7 +107,7 @@ theorem down_remembered (cfg : Config) (st : State) (ev : InputEvent)
     (ht : (ev.key == cfg.toggleKey) = false)
     (he : (cfg.escapeToNormal && ev.key == PhysKey.key .esc) = false) :
     ev.key ∈ (step cfg st ev).1.down := by
-  rw [step, if_neg (by simp [hinj]), hdir]
+  rw [step_def, if_neg (by simp [hinj]), hdir]
   simp only [ht, Bool.false_eq_true, if_false, hm, if_true, he, State.press]
   split
   · next h => simpa using h
@@ -83,8 +134,8 @@ straight through: it never re-enters the machine as a command.  On macOS and
 Windows the filter genuinely observes its own output, so without this a single
 `dd` could cascade. -/
 theorem no_feedback (cfg : Config) (st : State) (ev : InputEvent) (h : ev.injected = true) :
-    step cfg st ev = (st, [ev.passthrough]) := by
-  rw [step, if_pos (by simp [h])]
+    step cfg st ev = (st, [ev.passthrough]) :=
+  step_of_handled (prelude_no_feedback cfg st ev h)
 
 /-! ## Insert mode is transparent
 
@@ -98,7 +149,7 @@ theorem step_insert (cfg : Config) (st : State) (ev : InputEvent)
     (htoggle : (ev.key == cfg.toggleKey) = false)
     (hesc : (cfg.escapeToNormal && ev.key == PhysKey.key .esc) = false) :
     step cfg st ev = (st.press ev.key, [ev.passthrough]) := by
-  rw [step, if_neg (by simp [hinj]), hdir]
+  rw [step_def, if_neg (by simp [hinj]), hdir]
   simp only [htoggle, Bool.false_eq_true, if_false, hm, if_true, hesc]
 
 /-- ... and therefore a whole stream is passed through unchanged. -/
@@ -141,14 +192,14 @@ theorem SettledMode.toggle_involutive : Function.Involutive SettledMode.toggle :
 /-- Pressing the toggle key flips the mode, forgets any half-typed command, and
 types nothing. -/
 theorem step_toggle_down (cfg : Config) (st : State) (mods : Mods) :
-    step cfg st { dir := .down, key := cfg.toggleKey, mods := mods } = (st.toggleMode, []) := by
-  simp [step]
+    step cfg st { dir := .down, key := cfg.toggleKey, mods := mods } = (st.toggleMode, []) :=
+  step_of_handled (prelude_toggle_down cfg st mods)
 
 /-- Releasing it does nothing at all. -/
 theorem step_toggle_up (cfg : Config) (st : State) (mods : Mods)
     (hn : cfg.toggleKey ∉ st.down) :
-    step cfg st { dir := .up, key := cfg.toggleKey, mods := mods } = (st, []) := by
-  simp [step, hn]
+    step cfg st { dir := .up, key := cfg.toggleKey, mods := mods } = (st, []) :=
+  step_of_handled (prelude_toggle_up cfg st mods hn)
 
 /-- Caps Lock never types anything. -/
 theorem capsLock_silent (cfg : Config) (st : State) (dir : Dir) (mods : Mods)
@@ -187,7 +238,7 @@ without typing anything.  This is the "get me out of here" guarantee. -/
 theorem esc_resets (cfg : Config) (st : State) (mods : Mods)
     (hm : st.mode.isInsert = false) (htoggle : (PhysKey.key Key.esc == cfg.toggleKey) = false) :
     step cfg st { dir := .down, key := .key .esc, mods := mods } = (st.toNormal, []) := by
-  simp [step, htoggle, hm, InputEvent.chord?, command, State.toNormal, Response.commit,
+  simp [step_def, htoggle, hm, InputEvent.chord?, command, State.toNormal, Response.commit,
     Response.emit, Response.chords, emitChords, State.toggleMode]
 
 /-! ## Bounded work
@@ -239,7 +290,7 @@ theorem command_count_le (cfg : Config) (st : State) (c : Chord) (h : st.count �
 /-- And so it never exceeds `maxCount` while the machine is running. -/
 theorem step_count_le (cfg : Config) (st : State) (ev : InputEvent) (h : st.count ≤ cfg.maxCount) :
     (step cfg st ev).1.count ≤ cfg.maxCount := by
-  unfold step
+  rw [step_def]
   repeat' split
   all_goals try simp only [commit_count]
   all_goals try exact command_count_le cfg st _ h
@@ -279,7 +330,7 @@ theorem step_emit_length_le (cfg : Config) (st : State) (ev : InputEvent) (c : C
     (hi : st.mode.isInsert = false) (ht : (ev.key == cfg.toggleKey) = false) :
     (step cfg st ev).2.length ≤ 10 * (command cfg st c).chords.length := by
   have : (step cfg st ev).2 = emitChords (command cfg st c).chords := by
-    simp [step, ht, hi, hd, hc, hinj, Response.emit]
+    simp [step_def, ht, hi, hd, hc, hinj, Response.emit]
   rw [this]
   induction (command cfg st c).chords with
   | nil => simp [emitChords]

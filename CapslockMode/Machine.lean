@@ -487,32 +487,107 @@ def InputEvent.chord? (ev : InputEvent) : Option Chord :=
   | .key k => some { mods := ev.mods, key := k }
   | _ => none
 
-/-- **The** function: one keyboard event in, a new state and the events to
-inject out.
+/-! ## The prelude, and the backend behind it
 
-Releases are handled first and uniformly: CapslockMode forwards a key-up
+Three of the machine's guards are about being a *keyboard filter*, not about
+vi: the injected-event check, release matching, and the mode key.  They are
+split out so that a second backend cannot reach a key without them having run —
+the alternative, duplicating them in each backend, is how one of them
+eventually gets forgotten in exactly the backend nobody tests by hand. -/
+
+/-- What the prelude decided.  An inductive rather than
+`Option (State × List OutputEvent)`: "resolved, emitting nothing" and "not my
+business" are different answers, and a sum type is the only encoding that
+cannot confuse them. -/
+inductive Pre where
+  /-- A guard resolved the event; do not dispatch. -/
+  | handled (st : State) (out : List OutputEvent)
+  /-- Nothing machine-level to say: hand it to the bound backend. -/
+  | dispatch (st : State) (ev : InputEvent)
+  deriving DecidableEq, Repr, Inhabited
+
+/-- What any backend must do before it looks at a key at all.
+
+Releases are handled here and uniformly: CapslockMode forwards a key-up
 exactly when it forwarded the matching key-down, whatever has happened to the
 mode in between.  That is what keeps a key from getting stuck when you hit Caps
-Lock with a finger still down, and it is what `up_only_if_pressed` proves. -/
-def step (cfg : Config) (st : State) (ev : InputEvent) : State × List OutputEvent :=
+Lock with a finger still down, and it is what `prelude_up_only_if_pressed`
+proves — about the prelude, so the promise holds for a backend not yet
+written. -/
+def prelude (cfg : Config) (st : State) (ev : InputEvent) : Pre :=
   if ev.injected then
     -- our own event, already on its way to the application: hands off
-    (st, [ev.passthrough])
+    .handled st [ev.passthrough]
   else match ev.dir with
   | .up =>
-    if st.down.contains ev.key then (st.release ev.key, [⟨.up, ev.key⟩]) else (st, [])
+    if st.down.contains ev.key then .handled (st.release ev.key) [⟨.up, ev.key⟩]
+    else .handled st []
   | .down =>
     if ev.key == cfg.toggleKey then
-      (st.toggleMode, [])
-    else if st.mode.isInsert then
-      if cfg.escapeToNormal && ev.key == PhysKey.key .esc then
-        ({ st with mode := .normal, pending := .idle, count := 0 }, [])
-      else
-        (st.press ev.key, [ev.passthrough])
+      .handled st.toggleMode []
     else
-      match ev.chord? with
-      | none => (st, [])
-      | some c => ((command cfg st c).commit, (command cfg st c).emit)
+      .dispatch st ev
+
+/-- The vi backend: a key press that survived the prelude, read as vi reads
+it.  Everything here is vi-specific, which is precisely what the prelude above
+is not. -/
+def viStep (cfg : Config) (st : State) (ev : InputEvent) : State × List OutputEvent :=
+  if st.mode.isInsert then
+    if cfg.escapeToNormal && ev.key == PhysKey.key .esc then
+      ({ st with mode := .normal, pending := .idle, count := 0 }, [])
+    else
+      (st.press ev.key, [ev.passthrough])
+  else
+    match ev.chord? with
+    | none => (st, [])
+    | some c => ((command cfg st c).commit, (command cfg st c).emit)
+
+/-- **The** function: one keyboard event in, a new state and the events to
+inject out.  The prelude first, then vi — until a dispatcher exists, vi is the
+only backend there is to dispatch to. -/
+def step (cfg : Config) (st : State) (ev : InputEvent) : State × List OutputEvent :=
+  match prelude cfg st ev with
+  | .handled st' out => (st', out)
+  | .dispatch st' ev' => viStep cfg st' ev'
+
+/-- `step` with the guards inlined again, exactly as it read before they were
+hoisted.  Every proof that unfolds `step` rewrites with this instead, so the
+hoist costs the proofs one token rather than a reshaping: if this ever stops
+holding, the refactor stopped being behaviour-preserving. -/
+theorem step_def (cfg : Config) (st : State) (ev : InputEvent) :
+    step cfg st ev =
+      (if ev.injected then
+        (st, [ev.passthrough])
+      else match ev.dir with
+      | .up =>
+        if st.down.contains ev.key then (st.release ev.key, [⟨.up, ev.key⟩]) else (st, [])
+      | .down =>
+        if ev.key == cfg.toggleKey then
+          (st.toggleMode, [])
+        else if st.mode.isInsert then
+          if cfg.escapeToNormal && ev.key == PhysKey.key .esc then
+            ({ st with mode := .normal, pending := .idle, count := 0 }, [])
+          else
+            (st.press ev.key, [ev.passthrough])
+        else
+          match ev.chord? with
+          | none => (st, [])
+          | some c => ((command cfg st c).commit, (command cfg st c).emit)) := by
+  unfold step prelude
+  cases ev.injected with
+  | true => rfl
+  | false =>
+    cases ev.dir with
+    | up => cases st.down.contains ev.key <;> rfl
+    | down => cases ev.key == cfg.toggleKey <;> rfl
+
+/-- When the prelude resolves an event, `step` is exactly what it decided.
+This is what lets each guard theorem in `CapslockMode.Invariants` be a
+corollary of its `prelude` form rather than a second proof of the same fact. -/
+theorem step_of_handled {cfg : Config} {st st' : State} {ev : InputEvent}
+    {out : List OutputEvent} (h : prelude cfg st ev = .handled st' out) :
+    step cfg st ev = (st', out) := by
+  rw [step, h]
 
 /-- Feed a whole stream of events through the machine. -/
 def run (cfg : Config) (st : State) : List InputEvent → State × List OutputEvent

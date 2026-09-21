@@ -11,6 +11,10 @@ theorems=(
   step_count_le command_repeats_le operator_progress textObj_progress
   Chord.emit_balanced emitChords_balanced Chord.emit_length_le
   no_feedback
+  # the same guarantees one level down, where they hold for any backend and not
+  # just for vi
+  prelude_no_feedback prelude_up_only_if_pressed prelude_toggle_down
+  prelude_toggle_up prelude_capsLock_silent
   Quartz.encode_chord Quartz.encode_length Quartz.flags_settle Quartz.chordsOf_encode
   Quartz.decode_key
   Hid.reports_settle Hid.reportAfter_chord Hid.encodeFrom_length

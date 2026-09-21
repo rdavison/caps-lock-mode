@@ -16,7 +16,7 @@ About 2,900 lines of Lean, a Python driver, a Swift driver, and packaging.
 | Keys, chords, events | `CapslockMode/Key.lean` | Done |
 | Intents and platforms | `CapslockMode/Platform.lean` | Two platforms: `pc`, `mac` |
 | No-stuck-keys | `CapslockMode/Balance.lean` | 25 theorems |
-| The promises | `CapslockMode/Invariants.lean` | 37 theorems |
+| The promises | `CapslockMode/Invariants.lean` | 42 theorems |
 | macOS event model | `CapslockMode/Backend/Quartz.lean` | 12 theorems |
 | kanata evaluator | `CapslockMode/Kanata/` | Pure and timeless; 5 theorems |
 | Wire formats, key notation | `CapslockMode/Protocol.lean` | Two wires: `raw`, `quartz` |
@@ -31,7 +31,7 @@ About 2,900 lines of Lean, a Python driver, a Swift driver, and packaging.
 
 Three different levels, and the difference matters.
 
-**Proved.** 32 headline theorems, checked sorry-free by
+**Proved.** 39 headline theorems, checked sorry-free by
 `scripts/check-axioms.sh`; they depend only on Lean's three standard axioms.
 The big ones: `step_balanced` (nothing synthesised leaves a key held),
 `up_only_if_pressed` and `down_remembered` (releases match presses across mode
