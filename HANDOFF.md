@@ -12,13 +12,16 @@ About 2,900 lines of Lean, a Python driver, a Swift driver, and packaging.
 
 | Piece | File | State |
 | --- | --- | --- |
-| The modal machine | `CapslockMode/Machine.lean` | Done. `step` is the whole behaviour |
+| The modal machine | `CapslockMode/Machine.lean` | `prelude` guards, then `step` -- the vi backend |
 | Keys, chords, events | `CapslockMode/Key.lean` | Done |
 | Intents and platforms | `CapslockMode/Platform.lean` | Two platforms: `pc`, `mac` |
 | No-stuck-keys | `CapslockMode/Balance.lean` | 25 theorems |
 | The promises | `CapslockMode/Invariants.lean` | 42 theorems |
 | macOS event model | `CapslockMode/Backend/Quartz.lean` | 12 theorems |
+| HID event model | `CapslockMode/Backend/Hid.lean` | Level-based; 12 theorems |
 | kanata evaluator | `CapslockMode/Kanata/` | Pure and timeless; 5 theorems |
+| Code ↔ keycode | `CapslockMode/Bridge.lean` | Physical to physical; round trip proved |
+| Mode dispatch | `CapslockMode/Dispatch.lean` | Backends as parameters; 19 theorems |
 | Wire formats, key notation | `CapslockMode/Protocol.lean` | Two wires: `raw`, `quartz` |
 | Monitor rows | `CapslockMode/Monitor.lean` | What a driver displays; pure |
 | Model text field | `CapslockMode/Screen.lean` | Demo and test oracle only |
@@ -31,7 +34,7 @@ About 2,900 lines of Lean, a Python driver, a Swift driver, and packaging.
 
 Three different levels, and the difference matters.
 
-**Proved.** 39 headline theorems, checked sorry-free by
+**Proved.** 50 headline theorems, checked sorry-free by
 `scripts/check-axioms.sh`; they depend only on Lean's three standard axioms.
 The big ones: `step_balanced` (nothing synthesised leaves a key held),
 `up_only_if_pressed` and `down_remembered` (releases match presses across mode
@@ -294,6 +297,132 @@ which is a hard error so a typo is never skipped. The first two are recorded in
 `Cfg.blocked` and parsing continues, so the transparency results are about the
 real config rather than a trimmed copy; pressing a position that resolves to one
 is an error naming the form.
+
+## Modes bound to backends: where this got to, and what is next
+
+The idea: `insert` mode should not be a branch of the machine that passes keys
+through. It should be a *binding* -- a mode bound to an evaluator running the
+identity config -- so that transparency is a **consequence** rather than a
+promise the machine hardcodes.
+
+That now holds, in `CapslockMode/Dispatch.lean`:
+
+```lean
+theorem run_identity_transparent (src : Vector Kanata.Code n)
+    (w : World (State × Kanata.St)) (cs : List Kanata.Code)
+    (hm : w.backend.1.mode = .insert) (hc : ∀ c ∈ cs, c ≠ .capsLock) :
+    (run (identity src) w (cs.map fun c => (Dir.down, c))).2
+      = cs.map fun c => Effect.emitCode ⟨.down, c⟩
+```
+
+It follows from `Kanata.resolve_identity_any`. `Invariants.run_insert_transparent`
+is deliberately untouched -- it is a promise the README makes and
+`check-axioms.sh` names -- but it is no longer the reason the property holds.
+
+### The shape, and the mistake that shaped it
+
+A backend is a coalgebra passed as a **parameter**:
+
+```lean
+abbrev Step (σ : Type) := σ → Edge → Option (σ × List Effect)
+def dispatch {σ : Type} (back : Step σ) (w : World σ) (dir : Dir) (c : Kanata.Code) :
+    World σ × List Effect
+```
+
+`dispatch` names no backend. `vi` and `kanata` are instances; `select` combines
+two; `guarded` applies `prelude` as a transformer; `modal` and `viAlone` are
+assemblies.
+
+The first attempt had `World` carry a `Backend` enum beside one field per
+backend. That was wrong twice over, and both are worth remembering because the
+reasoning that produced it is seductive:
+
+* it hardcoded the backend set into the dispatcher's core type, which is the
+  opposite of decoupling modes from backends;
+* it *manufactured* an invariant. A tag beside the payloads can disagree with
+  them, so an agreement predicate had to be proved. Derive the routing from the
+  states instead and drift becomes unrepresentable.
+
+The false constraint behind it: `Platform.lean:14-15` says `Platform` is an
+enumeration "so that `Config` stays decidable", and that rule is about a
+**field**. Function *parameters* never threatened `DecidableEq`. Generalising a
+field rule into "no functions anywhere" is what pushed the design toward
+enumerating backends.
+
+`Effect.enter` carries only the mode for the same reason: the binding is a
+function of the mode, so naming the mode already names the backend.
+
+### What the design turned up
+
+* **`World.through`** is the obligation that replaced the invented one. A
+  position no backend claims is passed through, and nobody else accounts for
+  that emission -- so the dispatcher keeps its own record, third of a family
+  with `State.down` and `Kanata.St.holds`, carrying `up_only_if_through` and
+  `down_through_remembered`. Not decoration: an intermediate version emitted a
+  bare key-up when a `d` release in normal mode fell out of the bottom.
+* **`Step`'s `Option` is load-bearing.** `none` means "not mine". `prelude`'s
+  release guard consults `State.down`, so it can only speak for vi; a key-up it
+  does not recognise must be handed on, because the evaluator keeps its own
+  record. Press a layer key, hit Caps Lock before releasing, and without that
+  fallthrough the codes strand.
+* **`escapeToNormal` does not survive the binding.** A mode bound to the
+  evaluator has no vi affordances, so `Esc` passes through and Caps Lock is the
+  only way out.
+* **The evaluator is the floor.** `kanata` claims every edge, so when vi is
+  bound and declines a position it cannot name (`🔊`), a loaded config is still
+  asked. That is deliberate layering -- kanata sits below the layout and does
+  not stop because vi is in normal mode -- but it is a choice, not a neutral
+  fact.
+
+### Next, in order
+
+1. **Lift `Balanced` through `dispatch`.** `step_balanced` and
+   `Kanata.release_undoes_press` both exist; neither has been transported into a
+   single statement about an effect list. The transport looks cheap -- a key
+   with no image is dropped on *both* its press and its release, because the
+   mapping is a function, so filtering preserves balance.
+2. **Wire `Main.lean`.** `--kanata <file>` would be the first `IO.FS.readFile`
+   in the project; the parser is pure and already takes a `String`.
+   `Bridge.ofKeyCode?` / `toKeyCode?` are the seam a driver uses.
+3. **Phase 3: timestamps.** `InputEvent` gains `time : Nat := 0`, which is
+   additive -- the deriving clauses survive and every construction site keeps
+   compiling. That unlocks `tap-hold`, `one-shot` and `defchordsv2`, the three
+   forms the evaluator records as blocked. Budget carefully: tap-hold has twelve
+   documented variants and `concurrent-tap-hold` changes when timers start. The
+   fallback, letting the driver resolve tap-hold and send a decided action,
+   stays available.
+
+Known gaps, none of them hidden: `viAlone_down` covers presses only, since on
+release the dispatcher genuinely does something `step` does not; `select` is
+binary on purpose, because an n-ary version over a heterogeneous list needs
+dependent types the deriving would not survive; and the Quartz wire is the only
+one wired -- the raw evdev wire has no keycode and needs its own position
+mapping.
+
+### Working on this with a fresh context
+
+The phase plan lives at
+`~/.claude/plans/actually-make-a-plan-declarative-kurzweil.md`.
+
+Every piece of this was built to the same discipline, and it is worth keeping:
+
+* **No `sorry`, ever.** A theorem that will not land is deleted and reported as
+  a gap, never left as a hole.
+* **Additive first.** Each phase landed as its own commit, and the proved
+  modules were off limits until a step existed whose whole job was to touch them.
+* **The behaviour check is mechanical**, not a judgement:
+
+```sh
+lake build && ./scripts/selftest.sh && ./scripts/selftest-quartz.sh && ./scripts/check-axioms.sh
+printf 'down 57\ndown 2\nup 2\ndown 2\nup 2\n' | .lake/build/bin/capslockmode run --wire quartz --platform mac | md5
+# 0240da6b8326956da9329504833087f4 -- unchanged through every phase so far
+.lake/build/bin/capslockmode trace --start-normal 'ciwCAT<Esc>' | md5
+# c4fb3f6fa122ebb7d317387b6637410c
+```
+
+For a refactor that claims to preserve behaviour, diff the theorem *signatures*
+between `HEAD` and the working tree rather than reading the diff -- statements
+changing is the failure that review misses.
 
 ## Dependencies: cslib in, fern deferred
 
