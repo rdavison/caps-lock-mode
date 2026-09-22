@@ -11,6 +11,7 @@ CapslockMode: a modal, vi-like keyboard layer that Caps Lock switches on and off
 * `CapslockMode.Invariants` the promises: transparency, escape hatches, bounds
 * `CapslockMode.Kanata`     a pure, timeless evaluator for kanata configs
 * `CapslockMode.Bridge`     kanata positions and macOS keycodes are the same positions
+* `CapslockMode.Dispatch`   modes bound to backends; a backend is a parameter
 -/
 import CapslockMode.Key
 import CapslockMode.Machine
@@ -22,3 +23,4 @@ import CapslockMode.Balance
 import CapslockMode.Invariants
 import CapslockMode.Kanata
 import CapslockMode.Bridge
+import CapslockMode.Dispatch

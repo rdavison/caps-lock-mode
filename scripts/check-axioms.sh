@@ -22,6 +22,14 @@ theorems=(
   Kanata.resolve_transparent Kanata.resolve_identity_any Kanata.resolve_identity
   Kanata.release_undoes_press Kanata.release_restores_holds
   Bridge.code_roundTrip Bridge.toKeyCode_injective
+  # the dispatcher: transparency re-derived from the evaluator, and the one
+  # obligation a backend-agnostic router genuinely has of its own
+  Dispatch.wire_roundTrip Dispatch.dispatch_of_claimed
+  Dispatch.up_only_if_through Dispatch.down_through_remembered
+  Dispatch.select_first Dispatch.select_second
+  Dispatch.viAlone_down Dispatch.modal_bound
+  Dispatch.kanata_identity Dispatch.dispatch_identity_transparent
+  Dispatch.run_identity_transparent
 )
 
 tmp=$(mktemp -d)
