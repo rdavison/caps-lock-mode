@@ -238,6 +238,111 @@ func clearRemap() {
     remapApplied = false
 }
 
+// MARK: - kanata
+
+// kanata sits *below* this tap: it re-emits through its own virtual device, so
+// while it runs the codes arriving here are the ones it produced, not the keys
+// that were pressed.  That is the most confusing thing about reading this
+// window, which is why turning it off deserves a switch rather than a trip to
+// the terminal.
+//
+// Homebrew installs it as a LaunchDaemon running as root, with KeepAlive set,
+// so killing the process achieves nothing -- launchd starts it straight back
+// up.  The only honest mechanisms are launchctl's, and in the system domain
+// they need root; that is why flipping the switch raises the standard
+// authorisation dialog.
+enum Kanata {
+    struct Service {
+        let label: String
+        let plist: String
+        /// The `system` domain needs root.  A per-user agent does not.
+        let domain: String
+        var needsAdmin: Bool { domain == "system" }
+    }
+
+    private static let searchPaths: [(dir: String, domain: String)] = [
+        ("/Library/LaunchDaemons", "system"),
+        ("/Library/LaunchAgents", "gui/\(getuid())"),
+        (NSHomeDirectory() + "/Library/LaunchAgents", "gui/\(getuid())"),
+    ]
+
+    /// Resolved once.  A launchd job is not going to be installed while the
+    /// window is open, and scanning three directories at 20 Hz would be rude.
+    static let service: Service? = {
+        let fm = FileManager.default
+        for (dir, domain) in searchPaths {
+            guard let names = try? fm.contentsOfDirectory(atPath: dir) else { continue }
+            for name in names.sorted()
+            where name.hasSuffix(".plist") && name.lowercased().contains("kanata") {
+                return Service(label: String(name.dropLast(6)),
+                               plist: dir + "/" + name,
+                               domain: domain)
+            }
+        }
+        return nil
+    }()
+
+    /// Ask about the process, not the job.  `launchctl print` is slower and
+    /// needs the right domain to say anything useful, and the question here is
+    /// only ever "is something rewriting my keys right now".
+    static func isRunning() -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        p.arguments = ["-x", "kanata"]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return false }
+        p.waitUntilExit()
+        return p.terminationStatus == 0
+    }
+
+    /// Stop or start the job, off the main thread.  The authorisation dialog
+    /// blocks until it is answered, and the tap callback runs on main under a
+    /// deadline CoreGraphics will kill the tap for missing -- so this must not
+    /// be done inline no matter how briefly it seems to take.
+    static func setEnabled(_ on: Bool, completion: @escaping (String) -> Void) {
+        guard let svc = service else {
+            completion("no kanata launchd job found; nothing to toggle")
+            return
+        }
+        let cmd = on
+            ? "launchctl bootstrap \(svc.domain) '\(svc.plist)'"
+            : "launchctl bootout \(svc.domain)/\(svc.label)"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = run(cmd, asAdmin: svc.needsAdmin)
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    private static func run(_ cmd: String, asAdmin: Bool) -> String {
+        let p = Process()
+        if asAdmin {
+            // osascript raises the system's own authorisation dialog.  The
+            // password is typed into that dialog and never passes through this
+            // process, which is the whole reason for going via osascript.
+            let escaped = cmd.replacingOccurrences(of: "\\", with: "\\\\")
+                             .replacingOccurrences(of: "\"", with: "\\\"")
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            p.arguments = ["-e", "do shell script \"\(escaped)\" with administrator privileges"]
+        } else {
+            p.executableURL = URL(fileURLWithPath: "/bin/sh")
+            p.arguments = ["-c", cmd]
+        }
+        let err = Pipe()
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = err
+        do { try p.run() } catch { return "could not run launchctl: \(error)" }
+        let data = err.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        if p.terminationStatus == 0 { return "" }
+        let msg = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // -128 is AppleScript for "the user dismissed the dialog".
+        if msg.contains("-128") { return "cancelled" }
+        return msg.isEmpty ? "launchctl failed (status \(p.terminationStatus))" : msg
+    }
+}
+
 // MARK: - The machine
 
 let machine = Process()
@@ -555,6 +660,13 @@ final class MonitorWindow: NSObject, NSWindowDelegate, NSApplicationDelegate {
     private var trusted = false
     private var trustChecked = Date.distantPast
     private let accessButton = NSButton(title: "Accessibility...", target: nil, action: nil)
+    private let kanataBox: NSButton
+    /// Same reasoning as `trusted`: a `pgrep` per frame is wasteful, and the
+    /// answer does not change on that timescale.
+    private var kanataRunning = false
+    private var kanataChecked = Date.distantPast
+    /// While a toggle is in flight the poll must not fight the user's click.
+    private var kanataBusy = false
 
     override init() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 560),
@@ -589,6 +701,10 @@ final class MonitorWindow: NSObject, NSWindowDelegate, NSApplicationDelegate {
         remapBox.state = remapEnabled ? .on : .off
         remapBox.autoresizingMask = [.minYMargin]
 
+        kanataBox = NSButton(checkboxWithTitle: "kanata", target: nil, action: nil)
+        kanataBox.frame = NSRect(x: 500, y: h - 78, width: 264, height: 20)
+        kanataBox.autoresizingMask = [.minYMargin]
+
         accessButton.bezelStyle = .rounded
         accessButton.frame = NSRect(x: w - 108, y: h - 78, width: 96, height: 24)
         accessButton.autoresizingMask = [.minXMargin, .minYMargin]
@@ -619,6 +735,8 @@ final class MonitorWindow: NSObject, NSWindowDelegate, NSApplicationDelegate {
         toggleField.action = #selector(toggleKeyChanged)
         remapBox.target = self
         remapBox.action = #selector(remapChanged)
+        kanataBox.target = self
+        kanataBox.action = #selector(kanataChanged)
         accessButton.target = self
         accessButton.action = #selector(openAccessibility)
         content.addSubview(statusField)
@@ -627,6 +745,7 @@ final class MonitorWindow: NSObject, NSWindowDelegate, NSApplicationDelegate {
         content.addSubview(toggleLabel)
         content.addSubview(toggleField)
         content.addSubview(remapBox)
+        content.addSubview(kanataBox)
         content.addSubview(accessButton)
         content.addSubview(scroll)
         window.delegate = self
@@ -675,11 +794,67 @@ final class MonitorWindow: NSObject, NSWindowDelegate, NSApplicationDelegate {
             trusted = now
             trustChecked = Date()
         }
+        refreshKanata()
         let trust = trusted ? "granted" : "NOT granted"
         let state = armed ? "ARMED - keystrokes are being intercepted" : "disarmed"
         statusField.stringValue = "\(state)   |   Accessibility: \(trust)   |   events seen: \(eventsSeen)"
         armButton.title = armed ? "Stop" : "Start"
         accessButton.isHidden = trusted
+    }
+
+    /// kanata's state is polled rather than watched: there is no notification
+    /// for "a launchd job went away", and three seconds is well inside the time
+    /// it takes to wonder why the codes look wrong.
+    private func refreshKanata() {
+        guard !kanataBusy else { return }
+        guard Date().timeIntervalSince(kanataChecked) > 3.0 else { return }
+        kanataRunning = Kanata.isRunning()
+        kanataChecked = Date()
+        kanataBox.state = kanataRunning ? .on : .off
+        if Kanata.service == nil && !kanataRunning {
+            kanataBox.title = "kanata: not installed"
+            kanataBox.isEnabled = false
+        } else {
+            kanataBox.isEnabled = true
+            kanataBox.title = kanataRunning ? "kanata: running" : "kanata: stopped"
+        }
+    }
+
+    /// Stopping kanata is not cosmetic: it changes which device the codes below
+    /// arrive from, so say so rather than letting the window quietly start
+    /// describing a different keyboard.
+    @objc func kanataChanged() {
+        let wanted = kanataBox.state == .on
+        guard let svc = Kanata.service else {
+            append(["No kanata launchd job found, so there is nothing to toggle.",
+                    "If you start kanata by hand, stop it the way you started it."])
+            kanataBox.state = kanataRunning ? .on : .off
+            return
+        }
+        kanataBusy = true
+        kanataBox.isEnabled = false
+        kanataBox.title = wanted ? "kanata: starting..." : "kanata: stopping..."
+        append([(wanted ? "starting " : "stopping ") + svc.label
+                + " in domain " + svc.domain
+                + (svc.needsAdmin ? " (asks for an administrator password)" : "")])
+        if armed {
+            append(["kanata is changing under an armed tap: the codes below will",
+                    "start arriving from a different device. Stop and Start again",
+                    "if what you see stops making sense."])
+        }
+        Kanata.setEnabled(wanted) { [weak self] err in
+            guard let self = self else { return }
+            self.kanataBusy = false
+            self.kanataBox.isEnabled = true
+            self.kanataChecked = .distantPast
+            if err == "cancelled" {
+                self.append(["authorisation cancelled; kanata left as it was"])
+            } else if !err.isEmpty {
+                self.append(["kanata: " + err])
+            } else {
+                self.append(["kanata " + (wanted ? "started" : "stopped")])
+            }
+        }
     }
 
     /// The grant is keyed to this binary's code identity, and an ad-hoc signed
