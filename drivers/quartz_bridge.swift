@@ -70,6 +70,14 @@ func parseArgs() -> Options {
         let here = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
         o.binary = here.appendingPathComponent("capslockmode").path
     }
+
+    // Launched from an .app bundle -- double-clicked, or via `open` -- there is
+    // no argv to speak of, and the headless branch would sit on a run loop with
+    // no window and nothing to look at.  A bundle is only ever built for the
+    // monitor, so that is the sane default when nothing was asked for.
+    if CommandLine.arguments.count == 1, Bundle.main.bundleIdentifier != nil {
+        o.monitor = true
+    }
     return o
 }
 
