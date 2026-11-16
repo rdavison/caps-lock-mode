@@ -3,8 +3,11 @@
 Where CapslockMode is, what is actually verified, and what it costs to pick up.
 
 Branch `claude/capslockmode-vi-keyboard-fmlaeb`, open as
-[PR #1](https://github.com/rdavison/caps-lock-mode/pull/1). Three commits on top
-of the initial one: the machine and its proofs, the macOS backend, a CI fix.
+[PR #1](https://github.com/rdavison/caps-lock-mode/pull/1), pushed and current
+as of 2026-11-16. Fifteen commits on top of the initial one: the machine and its
+proofs, the macOS backend, a CI fix, the GUI monitor, the HID backend, the
+kanata evaluator, the dispatcher, and the .app wrapper that finally made the
+monitor launchable.
 
 ## What exists
 
@@ -28,6 +31,7 @@ About 2,900 lines of Lean, a Python driver, a Swift driver, and packaging.
 | CLI | `Main.lean` | `run`, `demo`, `trace`, `keys` |
 | Linux driver | `drivers/evdev_bridge.py` | Written, **never run** |
 | macOS driver | `drivers/quartz_bridge.swift` | **Works on real hardware**; `dd` edits a real field |
+| macOS app bundle | `scripts/build-app.sh` | Signed `.app`; the supported way to launch the monitor |
 | Packaging | `packaging/homebrew/`, `.github/workflows/release.yml` | Blocked on a tap repo |
 
 ## Verification status — read this before trusting anything
@@ -75,12 +79,53 @@ generator nothing, so repeats keep arriving as ordinary events and each is
 handled normally. Observed with kanata in the chain; a bare keyboard should
 behave the same way for the same reason, but that has not been checked.
 
-One thing that costs time if you do not know it: **launch it from your own
-terminal.** macOS attributes the Accessibility grant through the responsible
-process in the launch chain, so a driver started from some other tool's
-subprocess reads as untrusted even though the binary is byte-identical to the
-one you granted. `scripts/monitor.sh` will sit there waiting for a grant that
-already exists.
+**Launching it: use the .app, not the binary.** This is the expensive one, and
+what this document used to say about it was wrong in a way that wasted an
+afternoon on 2026-11-15.
+
+macOS attributes an Accessibility grant to the *responsible process* in the
+launch chain. For a bare executable started from a shell that is the terminal,
+not the executable -- so adding the binary under Privacy & Security does nothing
+at all. The entry appears in the list, stays ticked, and is inert, and nothing
+anywhere reports a problem. The old advice here, "launch it from your own
+terminal", described the mechanism correctly and then drew the wrong conclusion
+from it: your own terminal is not enough, because your own terminal is the
+process being credited.
+
+There is a second trap underneath that one, and it is worth checking first
+because it is invisible. `swiftc` leaves a *linker-signed* signature
+(`flags=0x20002(adhoc,linker-signed)`), and TCC will not bind a persistent grant
+to one at all. `codesign -f -s -` replaces it with a plain ad-hoc signature
+(`flags=0x2`). Run `codesign -dv` and read the flags before concluding anything
+about a grant that will not stick.
+
+So the supported launch is `scripts/build-app.sh`, which assembles
+`.lake/build/CapslockMode.app`: the driver, the Lean binary copied in beside it
+(copied, not linked -- codesign would follow a hard link back into `.lake` and
+re-sign the build output in place), an Info.plist with a stable bundle
+identifier, signed nested-executable-first and verified with `codesign --verify
+--deep --strict`. Launched with `open`, the app is its own responsible process,
+so pressing Start raises the system prompt and macOS adds the entry itself. No
+path is ever typed by hand, which is the step that kept going wrong.
+
+Granting the app also keeps the grant where it belongs. The other thing that
+works -- granting Terminal.app -- hands the same power to everything you ever
+run from a shell.
+
+The bundle is still ad-hoc signed, so its identity still moves on every rebuild.
+`build-app.sh` recompiles only when the source actually changed, and says plainly
+when the identity shifted under a live grant.
+
+**The monitor can stop kanata.** A switch in the window reads the daemon's state
+and stops or starts it, which matters because kanata sits below the tap: while
+it runs, the codes in the window are the ones *it* produced, not the keys that
+were pressed. Why it is not simply a `kill`: Homebrew installs kanata as a
+LaunchDaemon running as root with `KeepAlive` set, so killing the process only
+makes launchd start it again. `launchctl bootout` is the mechanism; in the
+`system` domain it needs root, so the toggle goes through osascript's
+authorisation dialog, and the password is typed into the system dialog and never
+passes through the driver. State is read with `pgrep` rather than from `brew
+services`, which reports the job as `none` while it is plainly running.
 
 It also compiles clean. First build, same machine, same day:
 
@@ -97,11 +142,11 @@ someone passes `-swift-version 6`, those globals are where it will break.
 `otool -L` shows only `/usr/lib` and `/System` links, so it passes the gate in
 `release.yml`. `--check` correctly reports `not trusted` and exits 1.
 
-The driver was first exercised through `scripts/monitor.sh`, which is the
-supported way to launch it: it rebuilds only when the source changed (an ad-hoc
-signed binary gets a new code identity on every rebuild, which silently voids
-the Accessibility grant), warns when the identity moved, and waits for the grant
-rather than opening a window that cannot see the keyboard.
+`scripts/monitor.sh` was the original launcher and is now superseded by
+`build-app.sh`. Everything it says about rebuilds and code identity is right,
+and its rebuild-only-when-changed logic is where `build-app.sh` got it from --
+but its Accessibility instructions tell you to add the bare binary, which cannot
+work, and it has not been updated.
 
 ## Building it somewhere new
 
@@ -172,13 +217,20 @@ unfolding a helper inside a big bash.
   the `TAP_TOKEN` secret, then uncomment the push step at the end of
   `.github/workflows/release.yml`. Until then the formula is published as a
   build artifact to copy across by hand.
-* **A Developer ID ($99/yr), or not.** The release signs ad-hoc, so macOS treats
-  every upgrade as a new program and the Accessibility grant has to be removed
-  and re-added after each `brew upgrade`. Notarisation would fix that and is a
-  self-contained change: a signing identity in CI and a notarytool step.
+* **A Developer ID ($99/yr): decided, and the answer is no.** Not publishing
+  this for now (decided 2026-11-16), so the ad-hoc signature stays and its cost
+  stays with it: every rebuild is a new code identity, and a grant made against
+  the old one is dead rather than merely stale -- it has to be removed and
+  re-added, never re-ticked. Revisit only if this is ever distributed.
+  Notarisation would be a self-contained change: a signing identity in CI plus a
+  notarytool step.
 
 **Code, roughly in order of value:**
 
+* **Fix `scripts/monitor.sh`, or delete it.** It still prints instructions to
+  add the bare binary to Accessibility. That cannot work, for the reason in the
+  verification section, and it is the most expensive wrong sentence in this
+  repository.
 * **Run the Linux driver.** `drivers/evdev_bridge.py` has still never been run.
   The macOS side is done (see above), so this is what is left of "run the
   drivers", and it is still the highest-value unknown on that platform.
@@ -373,6 +425,15 @@ function of the mode, so naming the mode already names the backend.
   asked. That is deliberate layering -- kanata sits below the layout and does
   not stop because vi is in normal mode -- but it is a choice, not a neutral
   fact.
+* **`Dispatch.kanata` keeps its name: considered and declined, 2026-11-16.**
+  The name collides twice -- with the daemon, which the monitor can now stop,
+  and with `CapslockMode.Kanata`, the config language this evaluates. `layered`
+  was the candidate. Left alone because the collision is cheaper than churn in a
+  proved module, and because every alternative loses the one fact a reader needs:
+  that this evaluates a kanata config. Note while you are here that
+  "passthrough" would be an actively *wrong* rename. `kanata` never returns
+  `none`; it emits an unknown code unchanged while still claiming the edge,
+  which is not the same as declining it into `World.through`.
 
 ### Next, in order
 
