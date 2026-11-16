@@ -10,8 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Builds the library and the binary, and runs the `#guard` suites in
-      # Tests/Basic.lean and Tests/Quartz.lean, since Tests is a default target.
+      # Builds the library and the binary, and runs every `#guard` suite under
+      # Tests/, since the `Tests.+` glob is a default target and compiling a
+      # guard is running it.
       - uses: leanprover/lean-action@v1
         with:
           use-mathlib-cache: true

@@ -4,10 +4,11 @@ Where CapslockMode is, what is actually verified, and what it costs to pick up.
 
 Branch `claude/capslockmode-vi-keyboard-fmlaeb`, open as
 [PR #1](https://github.com/rdavison/caps-lock-mode/pull/1), pushed and current
-as of 2026-11-16. Fifteen commits on top of the initial one: the machine and its
-proofs, the macOS backend, a CI fix, the GUI monitor, the HID backend, the
-kanata evaluator, the dispatcher, and the .app wrapper that finally made the
-monitor launchable.
+as of 2026-11-16. Twenty-three commits on top of the initial one: the machine
+and its proofs, the macOS backend, a CI fix, the GUI monitor, the HID backend,
+the kanata evaluator, the dispatcher, the .app wrapper that finally made the
+monitor launchable, and the seven that wired a real kanata config to the
+keyboard and gave the mode key a clock.
 
 ## What exists
 
@@ -22,13 +23,14 @@ About 2,900 lines of Lean, a Python driver, a Swift driver, and packaging.
 | The promises | `CapslockMode/Invariants.lean` | 42 theorems |
 | macOS event model | `CapslockMode/Backend/Quartz.lean` | 12 theorems |
 | HID event model | `CapslockMode/Backend/Hid.lean` | Level-based; 12 theorems |
-| kanata evaluator | `CapslockMode/Kanata/` | Pure and timeless; 5 theorems |
+| kanata evaluator | `CapslockMode/Kanata/` | Pure; `tap-hold` modelled, the rest of the clock forms refused |
 | Code ↔ keycode | `CapslockMode/Bridge.lean` | Physical to physical; round trip proved |
 | Mode dispatch | `CapslockMode/Dispatch.lean` | Backends as parameters; 19 theorems |
+| Effects → wire | `CapslockMode/Dispatch/Wire.lean` | The seam `Main` needed; `posts_of_emits` |
 | Wire formats, key notation | `CapslockMode/Protocol.lean` | Two wires: `raw`, `quartz` |
 | Monitor rows | `CapslockMode/Monitor.lean` | What a driver displays; pure |
 | Model text field | `CapslockMode/Screen.lean` | Demo and test oracle only |
-| CLI | `Main.lean` | `run`, `demo`, `trace`, `keys` |
+| CLI | `Main.lean` | `run`, `demo`, `trace`, `keys`; `--kanata <file>` runs a config |
 | Linux driver | `drivers/evdev_bridge.py` | Written, **never run** |
 | macOS driver | `drivers/quartz_bridge.swift` | **Works on real hardware**; `dd` edits a real field |
 | macOS app bundle | `scripts/build-app.sh` | Signed `.app`; the supported way to launch the monitor |
@@ -437,21 +439,19 @@ function of the mode, so naming the mode already names the backend.
 
 ### Next, in order
 
+Items 2 and 3 below are **done**, 2026-11-16; see "The config runs" after this
+list. Item 1 was skipped, deliberately: nothing in either depended on it, and it
+is still worth doing.
+
 1. **Lift `Balanced` through `dispatch`.** `step_balanced` and
    `Kanata.release_undoes_press` both exist; neither has been transported into a
    single statement about an effect list. The transport looks cheap -- a key
    with no image is dropped on *both* its press and its release, because the
    mapping is a function, so filtering preserves balance.
-2. **Wire `Main.lean`.** `--kanata <file>` would be the first `IO.FS.readFile`
-   in the project; the parser is pure and already takes a `String`.
-   `Bridge.ofKeyCode?` / `toKeyCode?` are the seam a driver uses.
-3. **Phase 3: timestamps.** `InputEvent` gains `time : Nat := 0`, which is
-   additive -- the deriving clauses survive and every construction site keeps
-   compiling. That unlocks `tap-hold`, `one-shot` and `defchordsv2`, the three
-   forms the evaluator records as blocked. Budget carefully: tap-hold has twelve
-   documented variants and `concurrent-tap-hold` changes when timers start. The
-   fallback, letting the driver resolve tap-hold and send a decided action,
-   stays available.
+2. ~~**Wire `Main.lean`.**~~ Done. `--kanata <file>`, and `Dispatch/Wire.lean`
+   is the encoder it needed.
+3. ~~**Phase 3: timestamps.**~~ Done, for `tap-hold` only. The rest of
+   `clockForms` is *not* waiting its turn -- see below.
 
 Known gaps, none of them hidden: `viAlone_down` covers presses only, since on
 release the dispatcher genuinely does something `step` does not; `select` is
@@ -460,10 +460,85 @@ dependent types the deriving would not survive; and the Quartz wire is the only
 one wired -- the raw evdev wire has no keycode and needs its own position
 mapping.
 
-### Working on this with a fresh context
+### The config runs
 
-The phase plan lives at
-`~/.claude/plans/actually-make-a-plan-declarative-kurzweil.md`.
+`capslockmode run --wire quartz --kanata ~/.config/kanata/kanata.kbd` binds a
+real kanata config to insert mode and leaves normal and visual to vi. Seven
+commits, 2026-11-16.
+
+**What is on the wire.** A stamp is a **tagged `@1234` token**, not a fourth
+positional field -- both parsers match exact arities, and `Monitor.lean` already
+rejected that shape once for the `dev` line. The precedent that works is
+`injected`: a tag filtered out of the word list before the arity match, so a
+stamp may sit anywhere and commutes with it. A word that looks like a stamp and
+is not drops the line, because a driver whose clock broke must look broken
+rather than read as time zero. **Output is never stamped** -- the machine does
+not re-read what it wrote, and a fourth token on an injectable line is what
+would break the driver's `inject`.
+
+Milliseconds, monotonic, origin the driver's own start. The driver converts,
+because `mach_timebase_info` is a platform fact in the same family as a `kVK_*`
+constant, and because milliseconds is the unit a config writes its timeouts in.
+Every reader computes a difference, so the origin cancels; `Nat` is unbounded,
+so there is no 49.7-day wrap; and `Nat` subtraction truncating to zero on a
+backwards clock reads as "no time has passed", which is the quiet answer.
+
+**`tap-hold` resolves retroactively**, on the next event to arrive, and no
+synthetic tick is needed. The reason is not obvious and is the thing to
+understand before changing any of it: a hold is only ever *observable* through
+another key, because a held modifier with nothing under it types nothing. So
+resolving late is indistinguishable from resolving on time. What it does not buy
+is a modifier observably down *before* the next keystroke -- Ctrl-click, and a
+UI that highlights live modifiers. That is a separate feature; `Kanata.settle`
+is the function a tick channel would call for it.
+
+**A divergence to know about.** kanata's plain `tap-hold` does not resolve on an
+interrupting press -- `tap-hold-press` adds that, and plain `tap-hold` buffers
+until its timer fires. Buffering needs a timer to flush it, so `(tap-hold ...)`
+here means kanata's **`tap-hold-press` decision rule**. The eleven other
+spellings stay in `clockForms`, so this is not a claim to model
+`tap-hold-press` itself.
+
+**`St.pending` is one, not a list**, so `concurrent-tap-hold` is recorded and
+still not modelled: a second tap-hold press settles the first as a hold.
+Widening it to a list is the change that would model it properly, and it is not
+structural. `holdTimeout` is parsed and unread -- the release rule is one
+comparison against `tapTimeout`, and the variants that make the two differ are
+still refused.
+
+**What phase 3 did *not* unlock, and why it is not just a matter of time.**
+`one-shot` is a latch with an expiry of its own: a second kind of pending state
+with a different lifetime. A `macro` emits *in the future* -- `(macro \ S-, 100
+spc ...)` delays between emissions -- so it needs something that fires with no
+input to prompt it. `defchordsv2` has several keys pending at once. A timestamp
+lets a form *decide* by time; it does not let one *act* at a time, and
+`Reason.clock`'s docstring now says so.
+
+**The mode key's second reading lives in `Dispatch.guarded`, not
+`Machine.prelude`** -- and that is why "Caps Lock never types anything"
+(`prelude_capsLock_silent`) and "the mode key is never dispatched"
+(`prelude_toggle_down`) keep their statements, unweakened. At the default
+`Config.toggleHold = none`, `toggleHold?` is `none` and `guarded` is
+definitionally the function it was. Only `viAlone_down` and `modal_bound` gained
+a hypothesis. The press is dispatched eagerly and the *release* decides, so the
+layer a hold pushes is live by the time the next key resolves and nothing is
+replayed.
+
+The default is on under `--kanata`, but only when the config binds that
+position. Without that guard a config whose `defsrc` omits `caps` would let a
+held mode key reach the system as a real Caps Lock -- the hardware light.
+
+**Recorded costs.** A kanata modifier folds into the flag level and posts no
+line, because a `CGEvent` carries its own flags field and that is what
+applications read; an app watching `flagsChanged` therefore sees nothing while a
+held modifier has no key under it. A flag mask names no side, so a recovered
+modifier is always the left one and a `defsrc` binding `rsft` never fires -- the
+loss is the wire's, and the fix is driver-side. The injected-event guard sits in
+`Main.runModal` rather than below the loop, because `Edge` has no `injected`
+field; giving it one, additively as `time` was given, is where that guard
+belongs.
+
+### Working on this with a fresh context
 
 Every piece of this was built to the same discipline, and it is worth keeping:
 

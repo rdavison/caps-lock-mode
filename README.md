@@ -319,8 +319,46 @@ HANDOFF.md                    state, verification status, gotchas, open work
 --max-count <n>     largest accepted count prefix (default: 100)
 --start-normal      start in normal mode
 --no-esc            do not let Esc return to normal mode from insert
+--kanata <file>     run this kanata config in insert mode (needs --wire quartz)
+--toggle-hold <ms>  hold the toggle key longer than this and it is not a mode
+                    switch but an ordinary position, which a loaded config may
+                    bind (default: off; 200 when --kanata is given and the
+                    config binds that position)
+--toggle-hold-off   keep the toggle key's single reading even with --kanata
 ```
 
 Because the toggle key is configuration rather than a constant, the proofs hold
 for whichever key you pick — including the perfectly reasonable choice of
 binding it to something other than Caps Lock.
+
+## Running a kanata config
+
+```
+$ capslockmode run --wire quartz --platform mac --kanata ~/.config/kanata/kanata.kbd
+```
+
+Insert mode becomes your kanata layout; normal and visual stay vi's. The config
+is read leniently — a form this evaluator does not model leaves its position
+inert rather than refusing the whole file — and every refusal is named twice:
+once at startup with the site it was written at, and again on stderr the moment
+you press it.
+
+```
+# kanata: ~/.config/kanata/kanata.kbd: 72 positions, 14 layers
+# kanata: 5 refused form(s); those positions fall through:
+#   one-shot in alias @rect (needs a clock)
+#   ...
+```
+
+What is modelled: `defsrc`, `defalias`, `deflayer`, `multi`, `layer-switch`,
+`layer-while-held`, `layer-toggle`, `unicode`, `use-defsrc`, transparency,
+no-ops, modifier prefixes, and `tap-hold`. What is not, with the reason
+recorded on each: the rest of the timing forms (`one-shot`, `macro`,
+`tap-dance`, chords — a timestamp lets a form *decide* by time, not *act* at
+one), the history forms (`repeat`, `fork`, `switch`, dynamic macros), and the
+world forms (`lrld`, and the whole mouse).
+
+With a config loaded, Caps Lock tapped still switches mode and Caps Lock *held*
+is an ordinary position — so a config that binds it to `(multi lctl
+(layer-while-held cmd-qwerty))` gives you Ctrl and your shortcut layer without
+giving up the mode key.
