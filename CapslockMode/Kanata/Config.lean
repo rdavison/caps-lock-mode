@@ -23,8 +23,14 @@ rather than in a plan nobody will read again.
 
 The costs, stated rather than hidden: `(multi a b)` and `(multi b a)` survive
 only as the order of `keys`, a `multi` holding two `layer-switch`es keeps the
-last, and a `use-defsrc` inside a `multi` always lands after the other codes
-rather than where it was written.  None is exercised by any config here.
+last, a `multi` holding two tap-holds likewise keeps the last, and a
+`use-defsrc` inside a `multi` always lands after the other codes rather than
+where it was written.  None is exercised by any config here.
+
+The record is split one level -- `Simple` for what a press does once the
+decision is made, `Action` for that plus a decision still open -- which is what
+lets `TapHold` hold two branches without `Action` becoming recursive and losing
+the `DecidableEq` reason 2 is about.
 
 ## Transparency is not a field
 
@@ -51,7 +57,7 @@ import CapslockMode.Kanata.Sexp
 namespace CapslockMode.Kanata
 
 /-- What pressing one position does, after aliases and `multi` are gone. -/
-structure Action where
+structure Simple where
   /-- Codes held for as long as the physical key is held, in press order. -/
   keys : List Code := []
   /-- Layer indices pushed for as long as the physical key is held. -/
@@ -78,6 +84,39 @@ structure Action where
   blocked : List String := []
   deriving DecidableEq, Repr, Inhabited
 
+/-- `(tap-hold <tap-ms> <hold-ms> <tap-action> <hold-action>)`.
+
+The two branches are `Simple`, not `Action`, so a tap-hold inside a tap-hold is
+not representable -- which is exactly right, because it is two clocks and a
+question about which one owns the key, and the parser records it in `blocked`
+rather than modelling it.  It is also what keeps `Action` non-recursive: this
+file's header declines to bet on `deriving DecidableEq` through an inductive
+recursive via `List`, and every `#guard` in `Tests/` depends on that bet not
+being made. -/
+structure TapHold where
+  /-- Released inside this many milliseconds and it was a tap. -/
+  tapTimeout : Nat
+  /-- Held at least this long and it is a hold.
+
+  **Stored and not read**, in this phase.  The release rule is a single
+  comparison against `tapTimeout`, and in every config seen here the two numbers
+  are equal -- `(tap-hold 200 200 ...)`.  The variants that make them differ,
+  `tap-hold-press-timeout` and `tap-hold-release-timeout`, are still in
+  `clockForms`, so nothing can yet reach a config where this matters. -/
+  holdTimeout : Nat
+  tap : Simple
+  hold : Simple
+  deriving DecidableEq, Repr, Inhabited
+
+/-- What pressing one position does, after aliases and `multi` are gone. -/
+structure Action extends Simple where
+  /-- A decision this press does not make yet.
+
+  `none` for every action that is already one, which is why `Layer.resolve`'s
+  type and its three theorems are untouched by tap-hold existing. -/
+  tapHold : Option TapHold := none
+  deriving DecidableEq, Repr, Inhabited
+
 /-- Combine two actions, as `(multi a b)` does. -/
 def Action.merge (a b : Action) : Action :=
   { keys := a.keys ++ b.keys
@@ -85,7 +124,8 @@ def Action.merge (a b : Action) : Action :=
   , switch := match b.switch with | some i => some i | none => a.switch
   , src := a.src || b.src
   , text := a.text ++ b.text
-  , blocked := a.blocked ++ b.blocked }
+  , blocked := a.blocked ++ b.blocked
+  , tapHold := match b.tapHold with | some t => some t | none => a.tapHold }
 
 /-- One `deflayer`.  `none` at a position is `_`. -/
 structure Layer (n : Nat) where
