@@ -30,6 +30,8 @@ theorems=(
   Dispatch.viAlone_down Dispatch.modal_bound
   Dispatch.kanata_identity Dispatch.dispatch_identity_transparent
   Dispatch.run_identity_transparent
+  # the wire: binding a config cannot move the channel vi owns
+  Dispatch.Wire.posts_of_emits
 )
 
 tmp=$(mktemp -d)
