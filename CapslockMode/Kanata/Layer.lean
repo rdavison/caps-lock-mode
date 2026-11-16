@@ -27,6 +27,23 @@ import CapslockMode.Kanata.Config
 
 namespace CapslockMode.Kanata
 
+/-- A tap-hold press whose decision is still open.
+
+One, and not a list.  kanata with `concurrent-tap-hold` allows several in
+flight; this evaluator allows one, and a second tap-hold press settles the first
+as a hold before becoming the new pending.  That is the honest size of this
+phase rather than a claim about kanata -- widening this to a list is the change
+that would model `concurrent-tap-hold` properly, and it is not structural. -/
+structure Pending where
+  /-- The `defsrc` position, matched on release exactly as `holds` is. -/
+  pos : Nat
+  /-- The form, resolved at press time and never resolved again -- the same
+  reason `holds` records the action rather than the position. -/
+  th : TapHold
+  /-- The wire's stamp on the press, in milliseconds. -/
+  pressedAt : Nat
+  deriving DecidableEq, Repr, Inhabited
+
 /-- What the evaluator remembers between events. -/
 structure St where
   /-- The layer a press consults when nothing is held. -/
@@ -34,6 +51,9 @@ structure St where
   /-- Positions currently held, newest first, each with what its press
   resolved to. -/
   holds : List (Nat × Action) := []
+  /-- A tap-hold press whose decision is still open.  Defaulted, so every `St`
+  literal in the proofs and the tests is unchanged by its existence. -/
+  pending : Option Pending := none
   deriving DecidableEq, Repr, Inhabited
 
 /-- The layers a press consults, top first.

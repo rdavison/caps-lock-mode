@@ -21,6 +21,8 @@ theorems=(
   Hid.apply_nodup Hid.reportAfter_nodup Hid.decode_self
   Kanata.resolve_transparent Kanata.resolve_identity_any Kanata.resolve_identity
   Kanata.release_undoes_press Kanata.release_restores_holds
+  # tap-hold: the dispatcher lifts the settle out, so it had better be idempotent
+  Kanata.settle_idem Kanata.settleHold_pending
   Bridge.code_roundTrip Bridge.toKeyCode_injective
   # the dispatcher: transparency re-derived from the evaluator, and the one
   # obligation a backend-agnostic router genuinely has of its own

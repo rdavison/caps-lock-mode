@@ -47,6 +47,13 @@ private def codes {σ : Type} (r : World σ × List Effect) : String :=
 private def keys {σ : Type} (r : World σ × List Effect) : String :=
   renderEvents (Effect.emitted r.2)
 
+/-- `go`, with a millisecond stamp on each edge.  `go` is the all-zero case,
+which is why it keeps its meaning: an unstamped stream is one on which nothing
+ever times out. -/
+private def goAt {σ : Type} (back : Step σ) (w : World σ)
+    (evs : List (Dir × Kanata.Code × Nat)) : World σ × List Effect :=
+  Dispatch.runAt back w evs
+
 /-! ## The identity config bound to `insert`
 
 `dispatch_identity_transparent` proves this for every width and every `defsrc`.
@@ -135,9 +142,40 @@ handful of positions and leaves the rest transparent. -/
 The alternative -- emitting nothing -- is the failure that hides, which is why
 `Cfg.blocked` records a form instead of the parser refusing the file. -/
 
--- Position 13 is `grv`, and layer 0 says `@grv-mode`, which is a `tap-hold`.
-#guard (dispatch realBack realW .down (at? 13)).2 == [Effect.refused "tap-hold" .clock]
-#guard (dispatch realBack realW .down (at? 13)).2 != []
+-- Position 69 is `spc`, and layer 9 (`win`) says `@rect`, a one-shot: a latch
+-- with its own expiry, which a timestamp does not buy.
+#guard (dispatch realBack { backend := ({}, { base := 9 }) } .down (at? 69)).2
+  == [Effect.refused "one-shot" .clock]
+
+/-! ### Tap-hold, through the dispatcher
+
+Position 13 is `grv`, and layer 0 says `@grv-mode`, which is
+`(tap-hold 200 200 grv (layer-while-held layers))`.  These are the same cases
+`Tests/Kanata.lean` guards one level down, re-stated here because the
+dispatcher is where the clock actually arrives -- `Edge.time`, off the wire. -/
+
+-- Tapped: a backtick, and nothing else.
+#guard codes (goAt realBack realW [(.down, at? 13, 0), (.up, at? 13, 80)])
+  == "down grv up grv"
+
+-- A press on its own says nothing at all.  This is the one press in the
+-- evaluator that emits nothing and records a decision instead.
+#guard codes (goAt realBack realW [(.down, at? 13, 0)]) == ""
+
+-- Held past the window and then a key: the hold settles first, so the `layers`
+-- layer is live and position 15 resolves there to `@nths-akl`, a layer switch.
+#guard (goAt realBack realW [(.down, at? 13, 0), (.down, at? 15, 300)]).2
+  == [Effect.setBase 4]
+
+-- The same inside the window.  An interrupting press resolves a tap-hold as a
+-- hold whatever the clock says -- this evaluator's one divergence from
+-- kanata's plain `tap-hold`, written down beside `clockForms`.
+#guard (goAt realBack realW [(.down, at? 13, 0), (.down, at? 15, 50)]).2
+  == [Effect.setBase 4]
+
+-- An unstamped stream is one on which nothing times out, so the same two edges
+-- through `go` are a tap.
+#guard codes (go realBack realW [(.down, at? 13), (.up, at? 13)]) == "down grv up grv"
 
 -- Position 18 is `5`, and layer 12 (`layers`) says `lrld`: timeless, and still
 -- refused, because it wants a file rather than a clock.

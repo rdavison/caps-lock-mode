@@ -137,9 +137,12 @@ structure Layer (n : Nat) where
 
 Three and not one, because "unsupported" is the least useful thing this
 evaluator could say.  The three are the three different futures: `clock` is
-fixed by giving `InputEvent` a timestamp, `history` by giving the evaluator a
-memory of what it has already emitted, and `world` by nothing in this project at
-all -- it is the reason that says *do not wait for a later phase*. -/
+fixed by giving `InputEvent` a timestamp -- though only half of them, since a
+stamp lets a form *decide* by time and not *act* at one, which is why `macro`
+and `one-shot` are still refused after `tap-hold` stopped being -- `history` by
+giving the evaluator a memory of what it has already emitted, and `world` by
+nothing in this project at all, which is the reason that says *do not wait for a
+later phase*. -/
 inductive Reason where
   /-- Decides by how long a key was held or how soon the next one came. -/
   | clock
@@ -221,14 +224,29 @@ distinction, and it is not worth having: the config does not run here either
 way, and "needs a clock" is the more useful half of the answer. -/
 
 /-- Needs a clock.  Every one of these decides what it does by how long a key
-was held or how soon the next one came, and nothing in this phase has a
-timestamp to decide with.
+was held or how soon the next one came.
+
+**`tap-hold` is no longer on this list**, and what is left is not simply waiting
+its turn.  A timestamp was enough for `tap-hold` because its decision is made
+*when the next event arrives*, and that event carries the clock.  The rest need
+more than a stamp:
+
+* `one-shot` is a latch with an expiry of its own -- a second kind of pending
+  state with a different lifetime, not the same one renamed.
+* `macro` emits *in the future*: `(macro \ S-, 100 spc ...)` has a delay between
+  emissions, so it needs something that fires with no input to prompt it.
+* `tap-dance`, `caps-word`, `sldr` and `scnl` are the same shape as one of those
+  two.
 
 `sldr` and `scnl` are here rather than with the history forms because a sequence
 leader's first obligation is the sequence *timeout*; that it also has to
-remember the sequence so far is the second problem, not the first. -/
+remember the sequence so far is the second problem, not the first.
+
+The eleven `tap-hold-*` variants stay, because they differ from plain
+`tap-hold` in exactly the part this evaluator decided by fiat: see the
+divergence recorded in `Kanata/Eval.lean`. -/
 def clockForms : List String :=
-  [ "tap-hold", "tap-hold-press", "tap-hold-release"
+  [ "tap-hold-press", "tap-hold-release"
   , "tap-hold-press-timeout", "tap-hold-release-timeout"
   , "tap-hold-release-keys", "tap-hold-except-keys"
   , "one-shot", "one-shot-press", "one-shot-release"
@@ -417,6 +435,11 @@ private def unicodeArg? (s : String) : Option Char :=
     if c.toNat == n then some c else none
   | _ => none
 
+/-- A bare number in argument position, for the two timeouts. -/
+private def natArg? : Sexp → Option Nat
+  | .atom a => if !a.isEmpty && a.all Char.isDigit then some a.toNat! else none
+  | _ => none
+
 private def layerArg (ctx : Ctx) (head : String) : List Sexp → Except String Nat
   | [.atom nm] =>
     match ctx.layerNames.findIdx? (· == nm) with
@@ -457,6 +480,26 @@ private partial def parseAction (ctx : Ctx) (e : Sexp) :
         | some c => .ok ({ text := [c] }, [])
         | none => .error s!"({head} {a}): expected one character, or U+ and a hex codepoint"
       | _ => .error s!"({head} ...) takes exactly one character"
+    else if head == "tap-hold" then
+      match args with
+      | [tapT, holdT, tapA, holdA] =>
+        match natArg? tapT, natArg? holdT with
+        | some tt, some ht => do
+          let (ta, tb) ← parseAction ctx tapA
+          let (ha, hb) ← parseAction ctx holdA
+          if ta.tapHold.isSome || ha.tapHold.isSome then
+            -- A tap-hold inside a tap-hold is two clocks and a question about
+            -- which one owns the key.  Recorded and refused, exactly as this
+            -- form was before the outer one was modelled.
+            .ok ({ blocked := ["tap-hold"] }, ["tap-hold"])
+          else
+            .ok ({ tapHold := some { tapTimeout := tt, holdTimeout := ht
+                                   , tap := ta.toSimple, hold := ha.toSimple } }, tb ++ hb)
+        | _, _ =>
+          .error s!"(tap-hold {tapT.render} {holdT.render} ...): \
+the two timeouts are numbers of milliseconds"
+      | _ =>
+        .error "(tap-hold <tap-ms> <hold-ms> <tap-action> <hold-action>) takes four arguments"
     else if isBlockedForm head then
       .ok ({ blocked := [head] }, [head])
     else

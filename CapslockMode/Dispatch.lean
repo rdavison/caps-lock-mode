@@ -559,25 +559,36 @@ same reason `Main.runQuartz` prints a `dropLine` for an event that decodes to
 nothing. -/
 def kanata (cfg : Kanata.Cfg n) : Step Kanata.St := fun st e =>
   match srcPos? cfg e.code with
+  -- A position `defsrc` does not mention is not intercepted, which is also why
+  -- it cannot interrupt a pending tap-hold: kanata never sees it.
   | none => some (st, [.emitCode ⟨e.dir, e.code⟩])
   | some p =>
+    -- The settle is lifted out of `pressAt` here, and only here, because the
+    -- `unicode` and `layer-switch` channels below are read off a resolution
+    -- this function does itself -- and a hold that resolves to a
+    -- `layer-while-held` moves the stack that resolution is against.  That
+    -- ordering *is* the mechanism of "hold the key, then type".  `pressAt`
+    -- calls `settle` again and `Kanata.settle_idem` says that is a no-op.
+    let (st, pre) := Kanata.settle st e.dir p.val
     match e.dir with
     | .up =>
-      let r := Kanata.release st p
-      some (r.1, r.2.map Effect.emitCode)
+      let r := Kanata.releaseAt st p e.time
+      some (r.1, (pre ++ r.2).map Effect.emitCode)
     | .down =>
-      -- `press` is `pressAction` applied to `resolve`, so this is that same
+      -- `pressAt` is `pressAction` applied to `resolve`, so this is that same
       -- resolution and not a second one; it is spelled out because the layer
       -- switch, the refused forms and the typed text are all on the action
       -- rather than in the events.
       let a := Kanata.resolve cfg st p
-      match Kanata.press cfg st p with
+      match Kanata.pressAt cfg st p e.time with
       | .ok (st', evs) =>
         some (st',
-          evs.map Effect.emitCode
+          (pre ++ evs).map Effect.emitCode
             ++ (if a.text.isEmpty then [] else [Effect.emitText a.text])
             ++ (match a.switch with | some i => [Effect.setBase i] | none => []))
-      | .error _ => some (st, a.blocked.map fun f => Effect.refused f (Kanata.reasonOf f))
+      | .error _ =>
+        some (st, pre.map Effect.emitCode
+                    ++ a.blocked.map fun f => Effect.refused f (Kanata.reasonOf f))
 
 /-! ## The assembly
 
@@ -633,17 +644,18 @@ there at all.
 contribution is the `defsrc` lookup, and that is exactly the point: transparency
 is a property of the config, not an arrangement made here. -/
 theorem kanata_identity (src : Vector Kanata.Code n) (st : Kanata.St) (e : Edge)
-    (hd : e.dir = .down) :
+    (hd : e.dir = .down) (hpend : st.pending = none) :
     ∃ st', kanata (Kanata.Cfg.identity src) st e
-      = some (st', [Effect.emitCode ⟨.down, e.code⟩]) := by
+      = some (st', [Effect.emitCode ⟨.down, e.code⟩]) ∧ st'.pending = none := by
   unfold kanata
   match hp : srcPos? (Kanata.Cfg.identity src) e.code with
-  | none => exact ⟨st, by simp [hd]⟩
+  | none => exact ⟨st, by simp [hd], hpend⟩
   | some p =>
     have hc := srcPos?_eq hp
     simp only [Kanata.Cfg.identity] at hc
-    refine ⟨{ base := st.base, holds := (p.val, { keys := [e.code] }) :: st.holds }, ?_⟩
-    simp [hd, Kanata.press, Kanata.pressAction, Kanata.resolve_identity_any, hc]
+    refine ⟨{ st with holds := (p.val, { keys := [e.code] }) :: st.holds }, ?_, by simp [hpend]⟩
+    simp [hd, hpend, Kanata.settle, Kanata.pressAt, Kanata.press, Kanata.pressAction,
+          Kanata.resolve_identity_any, hc, Except.map]
 
 /-- `prelude` lets a press past when it is not the mode key: the other side of
 `Invariants.prelude_toggle_down`, and the half a dispatcher needs, since its
@@ -699,11 +711,12 @@ theorem viEvent_key_ne {e : Edge} {iev : InputEvent} (hc : e.code ≠ .capsLock)
 The vi `State` comes back untouched, which is what keeps the binding where it
 was without anything having to check. -/
 theorem identity_press (src : Vector Kanata.Code n) (st : State) (kan : Kanata.St) (e : Edge)
-    (hm : st.mode = .insert) (hd : e.dir = .down) (hc : e.code ≠ .capsLock) :
+    (hm : st.mode = .insert) (hd : e.dir = .down) (hc : e.code ≠ .capsLock)
+    (hpend : kan.pending = none) :
     ∃ kan', identity src (st, kan) e
-      = some ((st, kan'), [Effect.emitCode ⟨.down, e.code⟩]) := by
-  obtain ⟨kan', hk⟩ := kanata_identity src kan e hd
-  refine ⟨kan', ?_⟩
+      = some ((st, kan'), [Effect.emitCode ⟨.down, e.code⟩]) ∧ kan'.pending = none := by
+  obtain ⟨kan', hk, hkp⟩ := kanata_identity src kan e hd hpend
+  refine ⟨kan', ?_, hkp⟩
   have hf : (!([Mode.insert] : Bound).contains st.mode) = false := by simp [hm]
   have hsel := select_second
     (fun (s : State) (_ : Kanata.St) => !([Mode.insert] : Bound).contains s.mode)
@@ -731,20 +744,33 @@ evaluator does not have it, and no hypothesis relating a backend tag to the
 mode, because there is no tag. -/
 theorem dispatch_identity_transparent (src : Vector Kanata.Code n)
     (w : World (State × Kanata.St)) (c : Kanata.Code)
-    (hm : w.backend.1.mode = .insert) (hc : c ≠ .capsLock) :
+    (hm : w.backend.1.mode = .insert) (hc : c ≠ .capsLock)
+    (hpend : w.backend.2.pending = none) :
     (dispatch (identity src) w .down c).2 = [Effect.emitCode ⟨.down, c⟩] := by
-  obtain ⟨kan', hk⟩ := identity_press src w.backend.1 w.backend.2
-    { dir := .down, code := c, mods := w.level .down c } hm rfl hc
+  obtain ⟨kan', hk, _⟩ := identity_press src w.backend.1 w.backend.2
+    { dir := .down, code := c, mods := w.level .down c } hm rfl hc hpend
   rw [dispatch_of_claimed _ _ _ _ _ _ hk]
 
 /-- The vi machine is untouched, which is what lets the stream form below
 induct: the mode stays where it was, so the binding stays where it was. -/
 theorem dispatch_identity_vi (src : Vector Kanata.Code n) (w : World (State × Kanata.St))
-    (c : Kanata.Code) (hm : w.backend.1.mode = .insert) (hc : c ≠ .capsLock) :
+    (c : Kanata.Code) (hm : w.backend.1.mode = .insert) (hc : c ≠ .capsLock)
+    (hpend : w.backend.2.pending = none) :
     (dispatch (identity src) w .down c).1.backend.1 = w.backend.1 := by
-  obtain ⟨kan', hk⟩ := identity_press src w.backend.1 w.backend.2
-    { dir := .down, code := c, mods := w.level .down c } hm rfl hc
+  obtain ⟨kan', hk, _⟩ := identity_press src w.backend.1 w.backend.2
+    { dir := .down, code := c, mods := w.level .down c } hm rfl hc hpend
   rw [dispatch_of_claimed _ _ _ _ _ _ hk]
+
+/-- The identity config never opens a tap-hold decision, so the stream form
+below can induct without the binding quietly drifting out from under it. -/
+theorem dispatch_identity_pending (src : Vector Kanata.Code n) (w : World (State × Kanata.St))
+    (c : Kanata.Code) (hm : w.backend.1.mode = .insert) (hc : c ≠ .capsLock)
+    (hpend : w.backend.2.pending = none) :
+    (dispatch (identity src) w .down c).1.backend.2.pending = none := by
+  obtain ⟨kan', hk, hkp⟩ := identity_press src w.backend.1 w.backend.2
+    { dir := .down, code := c, mods := w.level .down c } hm rfl hc hpend
+  rw [dispatch_of_claimed _ _ _ _ _ _ hk]
+  exact hkp
 
 /-- **... and therefore a whole stream is passed through unchanged**, which is
 `run_insert_transparent`'s statement re-derived from the evaluator rather than
@@ -753,18 +779,19 @@ requires: a release is not the identity on anything, it is the *undoing* of the
 press that `Kanata.release_undoes_press` is about. -/
 theorem run_identity_transparent (src : Vector Kanata.Code n) (w : World (State × Kanata.St))
     (cs : List Kanata.Code) (hm : w.backend.1.mode = .insert)
-    (hc : ∀ c ∈ cs, c ≠ .capsLock) :
+    (hc : ∀ c ∈ cs, c ≠ .capsLock) (hpend : w.backend.2.pending = none) :
     (run (identity src) w (cs.map fun c => (Dir.down, c))).2
       = cs.map fun c => Effect.emitCode ⟨.down, c⟩ := by
   induction cs generalizing w with
   | nil => rfl
   | cons c cs ih =>
-    have hvi := dispatch_identity_vi src w c hm (hc c (by simp))
+    have hvi := dispatch_identity_vi src w c hm (hc c (by simp)) hpend
     have hm' : (dispatch (identity src) w .down c).1.backend.1.mode = .insert := by
       rw [hvi]; exact hm
+    have hp' := dispatch_identity_pending src w c hm (hc c (by simp)) hpend
     simp only [List.map_cons, run,
-      dispatch_identity_transparent src w c hm (hc c (by simp)),
-      ih _ hm' fun c' h => hc c' (by simp [h])]
+      dispatch_identity_transparent src w c hm (hc c (by simp)) hpend,
+      ih _ hm' (fun c' h => hc c' (by simp [h])) hp']
     simp
 
 end CapslockMode.Dispatch

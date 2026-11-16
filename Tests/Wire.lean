@@ -126,14 +126,14 @@ private def fxBanner : List String :=
 -- The fixture is 72 positions and 14 layers, and it does trip the frontier.
 #guard fx.1 == 72
 #guard fx.2.layers.length == 14
-#guard fx.2.blocked.length == 7
+#guard fx.2.blocked.length == 5
 
 -- Two header lines plus one line per refusal, every one of them a comment --
 -- the prefix both wire parsers and the driver drop.
-#guard fxBanner.length == 3 + 7
+#guard fxBanner.length == 3 + 5
 #guard fxBanner.all (·.startsWith "#")
 
 -- The refusal a reader has to be able to find: the form, and the site.
-#guard fxBanner.any fun l => (l.splitOn "tap-hold in alias @grv-mode").length > 1
+#guard fxBanner.any fun l => (l.splitOn "one-shot in alias @rect").length > 1
 
 end CapslockMode.Tests.Wire

@@ -295,9 +295,12 @@ wrong.  `nav` is layer 7 and its second row is all `_`.  Position 13 is `grv` in
 #guard at? real {} 13 == some []        -- layer 0 says `@grv-mode`, which is blocked
 
 -- With delegation on, layer 0 joins the walk and the answer changes to the
--- `tap-hold` -- which is then a refusal rather than a keystroke.
+-- `tap-hold` -- which is a decision still open rather than a keystroke, so it
+-- names no codes and refuses nothing.
 #guard (resolveAt? { real with delegateToFirstLayer := true } { base := 7 } 13).map (·.blocked)
-  == some ["tap-hold"]
+  == some []
+#guard ((resolveAt? { real with delegateToFirstLayer := true } { base := 7 } 13).map
+  (·.tapHold.isSome)) == some true
 
 /-! ## The fixture's characteristic idiom
 
@@ -473,14 +476,12 @@ private def uniCfg : Cfg 3 :=
 
 #guard real.blocked ==
   [ { form := "defchordsv2", site := "top level", reason := .clock }
-  , { form := "tap-hold", site := "alias @grv-mode", reason := .clock }
-  , { form := "tap-hold", site := "alias @cap", reason := .clock }
   , { form := "one-shot", site := "alias @rect", reason := .clock }
   , { form := "macro", site := "alias @lchev", reason := .clock }
   , { form := "macro", site := "alias @rchev", reason := .clock }
   , { form := "lrld", site := "deflayer layers", reason := .world } ]
 
--- Six of the seven wait on a timestamp and one does not, which is the whole
+-- Four of the five wait on a timestamp and one does not, which is the whole
 -- reason the reason is recorded.
 #guard (real.blocked.filter (·.reason == .world)).map (·.form) == ["lrld"]
 #guard real.blocked.all (·.reason != .history)
@@ -488,17 +489,60 @@ private def uniCfg : Cfg 3 :=
 #guard Blocked.describe { form := "lrld", site := "deflayer layers", reason := .world }
   == "lrld in deflayer layers (needs the world outside the keyboard)"
 
--- `@grv-mode` is used at position 13 of four different layers and reported
--- once, at the alias that defines it.
-#guard (real.blocked.filter (·.form == "tap-hold")).length == 2
+-- `tap-hold` is modelled now, so neither `@grv-mode` nor `@cap` is refused.
+-- Asserted as the new truth rather than as a smaller number, so that a
+-- regression reads as "tap-hold came back" instead of "the count moved".
+#guard real.blocked.all (·.form != "tap-hold")
+
+-- What is left of the clock frontier, and why each one is still on it: a
+-- one-shot is a latch with its own expiry, a macro has to emit *in the future*,
+-- and a chord has several keys pending at once.  A timestamp fixes none of
+-- those; each needs a timer, or a `pending` that is a list.
+#guard (real.blocked.map (·.form)).eraseDups
+  == ["defchordsv2", "one-shot", "macro", "lrld"]
 
 -- `parseStrict` refuses the file, and says what it refused it for.
 #guard ((match parseStrict Fixture.kanataKbd with | .error m => m | .ok _ => "")
   |>.splitOn "defchordsv2").length == 2
 
 -- Pressing a blocked position is a named failure, not a wrong keystroke.
-#guard (match runIx real {} [(.down, 13)] with | .error m => m | .ok _ => "")
-  == "position 13 resolves to tap-hold, which this evaluator does not model"
+-- Position 18 is `5`, and layer 12 (`layers`) says `lrld`.
+#guard (match runIx real { base := 12 } [(.down, 18)] with | .error m => m | .ok _ => "")
+  == "position 18 resolves to lrld, which this evaluator does not model"
+
+/-! ### Tap-hold, on the config it was built for
+
+`@grv-mode` is `(tap-hold 200 200 grv (layer-while-held layers))` at position 13
+of four layers.  A press says nothing at all -- that is the one press in this
+evaluator that emits nothing and records a decision instead -- and the next
+event decides it. -/
+
+private def thRun (st : St) (evs : List (Dir × Nat × Nat)) : String :=
+  ((runIxAt real st evs).toOption.map (fun r => render r.2)).getD "<error>"
+
+-- A press alone emits nothing and leaves the decision open.
+#guard thRun {} [(.down, 13, 0)] == ""
+#guard ((runIxAt real {} [(.down, 13, 0)]).toOption.map (·.1.pending.isSome)) == some true
+
+-- Released inside the window: the tap action, pressed and released.
+#guard thRun {} [(.down, 13, 0), (.up, 13, 80)] == "down grv up grv"
+
+-- Released after it: the hold.  Here the hold is a bare `layer-while-held`, so
+-- it names no codes and emits nothing -- which is what kanata is observably
+-- doing too.
+#guard thRun {} [(.down, 13, 0), (.up, 13, 500)] == ""
+
+-- Interrupted by another key: the hold settles *first*, so position 15 resolves
+-- against a stack with `layers` on it.  Layer 12 says `@nths-akl` there, which
+-- is `(layer-switch nths-akl)` -- layer 4.  This one guard is the whole
+-- mechanism of "hold the key, then type".
+#guard ((runIxAt real {} [(.down, 13, 0), (.down, 15, 50)]).toOption.map (·.1.base))
+  == some 4
+
+-- An unstamped stream is one on which nothing ever times out, so every
+-- tap-hold on it is a tap.  That is what keeps `runIx` meaning what it meant.
+#guard (runIx real {} [(.down, 13), (.up, 13)]).toOption.map (fun r => render r.2)
+  == some "down grv up grv"
 
 /-! ### Refused, not unrecognised
 
