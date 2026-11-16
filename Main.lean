@@ -2,6 +2,7 @@
 # capslockmode
 
     capslockmode run            filter keyboard events (the real thing)
+    capslockmode run --kanata F  ... with a kanata config bound to insert mode
     capslockmode demo SCRIPT    type SCRIPT into a text field and show the result
     capslockmode trace SCRIPT   show what each key does, key by key
     capslockmode keys           print the key map (generated from the machine)
@@ -9,10 +10,7 @@
 `run` speaks the line protocol described in `CapslockMode/Protocol.lean`; a
 driver such as `drivers/evdev_bridge.py` connects it to a real keyboard.
 -/
-import CapslockMode.Machine
-import CapslockMode.Protocol
-import CapslockMode.Monitor
-import CapslockMode.Screen
+import CapslockMode
 
 open CapslockMode
 
@@ -32,6 +30,12 @@ structure Opts where
   verbose : Bool := false
   /-- Interleave `mon ...` lines describing each event, for a driver to display. -/
   monitor : Bool := false
+  /-- A kanata config to bind insert mode to.
+
+  A path and not a parsed config: `parseOpts` is pure and `Except String`, and
+  is the only part of this a `#guard` could ever reach.  Reading the file is the
+  one piece that genuinely is `IO`, so it happens in `main`. -/
+  kanata : Option System.FilePath := none
   deriving Inhabited
 
 def usage : String :=
@@ -47,6 +51,7 @@ USAGE:
 OPTIONS:
   --platform <name>   keystrokes to compile commands into: pc (default) or mac
   --wire <name>       protocol spoken by `run`: raw (default) or quartz
+  --kanata <file>     run this kanata config in insert mode (needs --wire quartz)
   --toggle <key>      key that switches modes (default: caps); a name, a bare
                       keycode of 2+ digits, or code:<n> for any keycode
   --max-count <n>     largest accepted count prefix (default: 100)
@@ -93,6 +98,7 @@ partial def parseOpts (args : List String) (o : Opts) : Except String (Opts × L
     if n.all Char.isDigit && !n.isEmpty then
       parseOpts rest { o with cfg := { o.cfg with maxCount := n.toNat! } }
     else .error s!"not a number: {n}"
+  | "--kanata" :: f :: rest => parseOpts rest { o with kanata := some f }
   | "--text" :: t :: rest => parseOpts rest { o with text := t }
   | "--start-normal" :: rest => parseOpts rest { o with cfg := { o.cfg with startMode := .normal } }
   | "--no-esc" :: rest => parseOpts rest { o with cfg := { o.cfg with escapeToNormal := false } }
@@ -103,6 +109,26 @@ partial def parseOpts (args : List String) (o : Opts) : Except String (Opts × L
     else do
       let (o, positional) ← parseOpts rest o
       return (o, a :: positional)
+
+/-- Options that parse but cannot be honoured together.
+
+Checked after the whole command line is read, so that `--kanata f --wire quartz`
+and `--wire quartz --kanata f` cannot disagree -- which is exactly what would
+happen if the check lived in `parseOpts`, where only one of them has been seen.
+
+Rejecting rather than ignoring: only the Quartz wire carries keycodes, so a
+`--kanata` under `--wire raw` can do nothing at all, and a flag that silently
+does nothing is the failure `Monitor.dropLine` exists to prevent. -/
+def optsError? (o : Opts) (cmd : String) : Option String :=
+  match o.kanata with
+  | none => none
+  | some _ =>
+    if cmd != "run" then
+      some s!"--kanata applies to `run`, not `{cmd}`"
+    else if o.wire != .quartz then
+      some "--kanata needs --wire quartz: only the Quartz wire carries keycodes, \
+so the raw wire has no way to name a position"
+    else none
 
 /-- The Quartz filter: keycodes and flag masks in, the same out.
 
@@ -186,6 +212,145 @@ partial def runQuartz (o : Opts) (st : State) (fin fout : Quartz.Flags)
         fout := Quartz.flagsAfter fout out
       stdout.flush
       runQuartz o st fin' fout dev
+
+/-- The Quartz filter with a kanata config bound to insert mode.
+
+Three states are threaded, one more than `runQuartz` and for the same reasons.
+`fin` is the level the tap last reported, so a `flags` line can be turned back
+into edges; `fout` is the level we have told macOS, so a modifier held across
+two keystrokes is not dropped; `w` is the dispatcher's own world, which carries
+the vi `State`, the evaluator's `St`, the recovered modifier level, and the
+positions no backend claimed.
+
+`mk` is the assembly as a function of the `Config` rather than a `Step`,
+because the `toggle <key>` control line rebuilds the config at runtime and
+`modal` has to be applied again.  `names` is the `deflayer` names, for the one
+line that announces a `layer-switch`.
+
+Note what this does *not* call: `Quartz.decode`.  It answers in key space --
+a `PhysKey`, which has no side for a modifier and no image at all for `🔊` --
+and the dispatcher's input is a position.  Keycode to `Code` is the direction
+that carries a round trip (`Bridge.code_roundTrip`), so the modal path uses it
+directly.  What `decode` does that is still needed, turning a mask into
+transitions, is `Wire.edges`, which reuses `Quartz.diff` so the two converters
+cannot drift. -/
+partial def runModal (o : Opts) (names : List String)
+    (mk : Config → Dispatch.Step (State × Kanata.St))
+    (w : Dispatch.World (State × Kanata.St)) (fin fout : Quartz.Flags)
+    (dev : Option Monitor.Device := none) : IO Unit := do
+  let stdin ← IO.getStdin
+  let stdout ← IO.getStdout
+  let stderr ← IO.getStderr
+  let line ← stdin.getLine
+  if line.isEmpty then return ()
+  let trimmed := line.trim
+  if trimmed.isEmpty || trimmed.startsWith "#" then runModal o names mk w fin fout dev
+  else if trimmed == "?" then
+    stdout.putStrLn s!"# mode: {w.backend.1.describe}  base: {w.backend.2.base}"
+    stdout.flush
+    runModal o names mk w fin fout dev
+  else if trimmed.startsWith "dev" then
+    match Monitor.parseDevice? trimmed with
+    | some d =>
+      if o.monitor then
+        if let some report := Monitor.deviceChange? dev d then
+          stdout.putStrLn report
+          stdout.flush
+      runModal o names mk w fin fout (some d)
+    | none =>
+      stderr.putStrLn s!"# ignored: {trimmed}"
+      runModal o names mk w fin fout dev
+  else if trimmed.startsWith "toggle" then
+    match trimmed.splitOn " " with
+    | ["toggle", k] =>
+      match parseToggle? k with
+      | some pk =>
+        let o := { o with cfg := { o.cfg with toggleKey := pk } }
+        stdout.putStrLn s!"# toggle: {pk.name}"
+        if o.monitor then stdout.putStrLn (Monitor.stateLine o.cfg.start)
+        stdout.flush
+        -- The evaluator resets with the machine.  Rebinding the key that leaves
+        -- normal mode while a position is held would stray either way, and
+        -- `Kanata.release` of a position it never recorded is silent by design,
+        -- so the quiet answer is to start both halves clean.
+        runModal o names mk { backend := (o.cfg.start, {}) } fin fout dev
+      | none =>
+        stderr.putStrLn s!"# unknown key: {k}"
+        runModal o names mk w fin fout dev
+    | _ =>
+      stderr.putStrLn s!"# usage: toggle <key>"
+      runModal o names mk w fin fout dev
+  else match Quartz.parseLine? trimmed with
+    | none =>
+      stderr.putStrLn s!"# ignored: {trimmed}"
+      if o.monitor then
+        stdout.putStrLn (Monitor.dropLine trimmed)
+        stdout.flush
+      runModal o names mk w fin fout dev
+    | some (ev, true) =>
+      -- Our own event on its way back to the application, handed straight on
+      -- exactly as `prelude` does.  The guard is here rather than below the
+      -- loop because `Edge` has no `injected` field yet; once it has one, this
+      -- branch should go and `prelude`'s `no_feedback` should do the work.
+      stdout.putStrLn ev.line
+      stdout.flush
+      runModal o names mk w (Dispatch.Wire.level ev) fout dev
+    | some (ev, false) =>
+      let (fin', eds) := Dispatch.Wire.edges fin ev
+      -- A line that names no position is the failure that hides, same as in
+      -- `runQuartz`: say so rather than looking dead.
+      if o.monitor && eds.isEmpty then
+        stdout.putStrLn (Monitor.dropLine trimmed)
+      let code := Monitor.codeOf ev
+      let back := mk o.cfg
+      let mut w := w
+      let mut fout := fout
+      for (dir, c) in eds do
+        let (w', eff) := Dispatch.dispatch back w dir c
+        let (fout', out) := Dispatch.Wire.many names fout eff
+        if o.monitor then
+          stdout.putStrLn (Dispatch.Wire.Row.line
+            { edge := { dir := dir, code := c, mods := w'.mods }
+              code := code, state := w'.backend.1, effects := eff })
+          for l in out.mon do stdout.putStrLn l
+          if (Dispatch.Wire.entered? eff).isSome then
+            stdout.putStrLn (Monitor.stateLine w'.backend.1)
+        for qe in out.posts do stdout.putStrLn qe.line
+        for l in out.loud do stderr.putStrLn l
+        w := w'
+        fout := fout'
+      stdout.flush
+      runModal o names mk w fin' fout dev
+
+/-- Read a kanata config and say what it contains, or say why not.
+
+`none` means the message is already printed and the exit code is 2.  The load
+happens before any monitor header, so a config that does not parse cannot leave
+a driver looking at a header over a run loop that will never answer.
+
+`Kanata.parse` and not `parseStrict`: a form this evaluator refuses still leaves
+a usable config, and refusing the file over one of them would be refusing the
+whole layout over a binding.  A `.error` here is a genuine syntax or width
+problem, which leniency should not swallow. -/
+def loadKanata (path : System.FilePath) : IO (Option ((n : Nat) × Kanata.Cfg n)) := do
+  let src? ←
+    try
+      pure (some (← IO.FS.readFile path))
+    catch e =>
+      IO.eprintln s!"capslockmode: cannot read {path}: {e}"
+      pure none
+  match src? with
+  | none => return none
+  | some src =>
+    match Kanata.parse src with
+    | .error e =>
+      IO.eprintln s!"capslockmode: {path}: {e}"
+      return none
+    | .ok sized =>
+      for l in Dispatch.Wire.banner (toString path) sized.1
+                 (sized.2.layers.map (·.name)) sized.2.blocked do
+        IO.eprintln l
+      return some sized
 
 /-- The filter: one line in, zero or more lines out. -/
 partial def runFilter (o : Opts) (st : State) : IO Unit := do
@@ -291,14 +456,34 @@ def main (args : List String) : IO UInt32 := do
     match parseOpts rest {} with
     | .error e => IO.eprintln s!"capslockmode: {e}"; return 2
     | .ok (o, positional) =>
+      match optsError? o cmd with
+      | some e => IO.eprintln s!"capslockmode: {e}"; return 2
+      | none =>
       match cmd, positional with
       | "run", _ =>
+        -- The config is read before anything is printed, so that a file which
+        -- does not parse exits rather than leaving a driver watching a header.
+        let kan? ← match o.kanata with
+          | none => pure (some none)
+          | some path => (Option.map some) <$> loadKanata path
+        match kan? with
+        | none => return 2
+        | some kan =>
         if o.monitor then
           IO.println Monitor.headerLine
           IO.println (Monitor.stateLine o.cfg.start)
-        match o.wire with
-        | .raw => runFilter o o.cfg.start
-        | .quartz => runQuartz o o.cfg.start {} {}
+        match kan with
+        | some ⟨_, kcfg⟩ =>
+          -- `Kanata.Sized` is a sigma, but `modal`'s result type does not
+          -- mention the width -- so destructuring here erases it and `runModal`
+          -- is an ordinary non-dependent loop.
+          runModal o (kcfg.layers.map (·.name))
+            (fun c => Dispatch.modal c [.insert] kcfg)
+            { backend := (o.cfg.start, {}) } {} {}
+        | none =>
+          match o.wire with
+          | .raw => runFilter o o.cfg.start
+          | .quartz => runQuartz o o.cfg.start {} {}
         return 0
       | "keys", _ => keys o; return 0
       | "demo", [s] => demo o s; return 0
