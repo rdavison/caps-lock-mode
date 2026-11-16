@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-13
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the machine
+        uses: leanprover/lean-action@v1
+        with:
+          use-mathlib-cache: true
+          build-args: "capslockmode"
+
+      - name: Build the event tap driver
+        run: swiftc -O drivers/quartz_bridge.swift -o capslockmode-quartz
+
+      # A downloaded binary that needs a dylib we did not ship is a support
+      # ticket. The Lean runtime links statically, so both binaries should
+      # reference nothing outside the system.
+      - name: Check both binaries are self-contained
+        run: |
+          set -euo pipefail
+          for bin in .lake/build/bin/capslockmode capslockmode-quartz; do
+            echo "== $bin"
+            otool -L "$bin"
+            if otool -L "$bin" | tail -n +2 | grep -vqE '^\s+(/usr/lib|/System)'; then
+              echo "unexpected dynamic dependency in $bin" >&2
+              exit 1
+            fi
+          done
+
+      - name: Run the tests
+        run: |
+          ./scripts/selftest.sh
+          ./scripts/selftest-quartz.sh
+          ./scripts/check-axioms.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: capslockmode-${{ matrix.arch }}
+          path: |
+            .lake/build/bin/capslockmode
+            capslockmode-quartz
+
+  universal:
+    needs: build
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: arch
+
+      - name: Merge the architectures and sign ad-hoc
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for name in capslockmode capslockmode-quartz; do
+            arm=$(find arch/capslockmode-arm64 -name "$name" -type f | head -1)
+            x86=$(find arch/capslockmode-x86_64 -name "$name" -type f | head -1)
+            lipo -create "$arm" "$x86" -output "dist/$name"
+            chmod +x "dist/$name"
+            # Ad-hoc, because there is no Developer ID yet. This is what makes
+            # every upgrade look like a new program to the Accessibility list.
+            codesign --force --sign - "dist/$name"
+            lipo -info "dist/$name"
+          done
+          tar -czf capslockmode-macos-universal.tar.gz -C dist capslockmode capslockmode-quartz
+          shasum -a 256 capslockmode-macos-universal.tar.gz | tee sha256.txt
+
+      - name: Update the formula with this version and checksum
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          sha=$(cut -d' ' -f1 sha256.txt)
+          sed -i '' \
+            -e "s|download/v[^/]*/capslockmode-macos-universal.tar.gz|download/v${version}/capslockmode-macos-universal.tar.gz|" \
+            -e "s|sha256 \"[a-f0-9]*\"|sha256 \"${sha}\"|" \
+            packaging/homebrew/capslockmode.rb
+          cat packaging/homebrew/capslockmode.rb
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            capslockmode-macos-universal.tar.gz
+            sha256.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: homebrew-formula
+          path: packaging/homebrew/capslockmode.rb
+
+      # The tap lives in a separate repository, because Homebrew requires the
+      # name `homebrew-capslockmode`. Create it, add a token with write access
+      # as the TAP_TOKEN secret, and enable this step; until then the formula
+      # is published as a build artifact to copy across by hand.
+      #
+      # - name: Push the formula to the tap
+      #   env:
+      #     TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+      #   run: |
+      #     git clone "https://x-access-token:${TAP_TOKEN}@github.com/rdavison/homebrew-capslockmode.git" tap
+      #     mkdir -p tap/Formula
+      #     cp packaging/homebrew/capslockmode.rb tap/Formula/capslockmode.rb
+      #     cd tap
+      #     git config user.name "github-actions[bot]"
+      #     git config user.email "github-actions[bot]@users.noreply.github.com"
+      #     git commit -am "capslockmode ${GITHUB_REF_NAME}" && git push
