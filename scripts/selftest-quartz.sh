@@ -47,6 +47,20 @@ check "no feedback loop" \
 # A half-typed `d` and then Esc: the command is abandoned, nothing is typed.
 check "esc is silent" $'down 57\ndown 2\ndown 53' ""
 
+# The clock rides as a tag, so a stamped line says exactly what an unstamped one
+# says until something actually reads a clock.  This is the md5 check written
+# out as a case.
+check "a stamp changes nothing by itself" \
+  $'down 57 - @10\ndown 2 - @20\nup 2 - @30\ndown 2 - @40\nup 2 - @50' \
+  "key down 123 command;key up 123 command;key down 125 shift;key up 125 shift;key down 117 -;key up 117 -"
+
+# Two tags, so they commute.
+check "stamp then injected" $'down 57\ndown 2 - @5 injected' "key down 2 -"
+check "injected then stamp" $'down 57\ndown 2 - injected @5' "key down 2 -"
+
+# A broken clock looks broken rather than reading as time zero.
+check "a bad stamp is dropped" $'down 2 - @x' ""
+
 # --------------------------------------------------------------------------
 # With a kanata config bound to insert mode.
 #

@@ -166,6 +166,14 @@ structure Edge where
   dir : Dir
   code : Kanata.Code
   mods : Mods := {}
+  /-- The stamp the wire carried, in position space.
+
+  `Edge` mirrors `InputEvent`, and this is the one field that genuinely has to
+  be in both: a backend below the layout decides a tap-hold by it, and the guard
+  above the layout decides the mode key by it, and neither can read the other's
+  vocabulary.  Defaulted for the same reason `InputEvent.time` is -- an
+  unstamped wire is one on which nothing has ever timed out. -/
+  time : Nat := 0
   deriving DecidableEq, Repr, Inhabited
 
 /-- A backend: a coalgebra on edges.  Its own state, and an unfold from one edge
@@ -238,10 +246,10 @@ run the coalgebra, and be accountable for the positions it had to pass through
 itself. -/
 
 /-- **The dispatcher.**  One physical position in, effects out. -/
-def dispatch {σ : Type} (back : Step σ) (w : World σ) (dir : Dir) (c : Kanata.Code) :
-    World σ × List Effect :=
+def dispatch {σ : Type} (back : Step σ) (w : World σ) (dir : Dir) (c : Kanata.Code)
+    (time : Nat := 0) : World σ × List Effect :=
   let mods := w.level dir c
-  match back w.backend { dir := dir, code := c, mods := mods } with
+  match back w.backend { dir := dir, code := c, mods := mods, time := time } with
   | some r => ({ w with backend := r.1, mods := mods }, r.2)
   | none =>
     -- Nobody claimed it, so the dispatcher answers -- and then owes the release.
@@ -263,6 +271,19 @@ def run {σ : Type} (back : Step σ) (w : World σ) :
   | (dir, c) :: rest =>
     let r := dispatch back w dir c
     let s := run back r.1 rest
+    (s.1, r.2 ++ s.2)
+
+/-- `run`, with a millisecond stamp on each position.
+
+`run` is the all-zero case, which is why it keeps its meaning rather than
+quietly becoming a lie: an unstamped stream is one on which nothing ever times
+out, so every tap-hold on it resolves as a tap. -/
+def runAt {σ : Type} (back : Step σ) (w : World σ) :
+    List (Dir × Kanata.Code × Nat) → World σ × List Effect
+  | [] => (w, [])
+  | (dir, c, t) :: rest =>
+    let r := dispatch back w dir c t
+    let s := runAt back r.1 rest
     (s.1, r.2 ++ s.2)
 
 /-- A claimed edge is the backend's answer and nothing else: the dispatcher adds
@@ -368,7 +389,8 @@ def viEvent? (e : Edge) : Option InputEvent :=
       key := match pk with
         | .key k => .key (Quartz.applyShift k e.mods.shift)
         | _ => pk
-      mods := e.mods }
+      mods := e.mods
+      time := e.time }
 
 /-- Announce a mode change, if there was one.  A named function rather than a
 `let` inside `guarded` so that the `enter` is one expression instead of four

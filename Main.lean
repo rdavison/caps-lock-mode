@@ -190,14 +190,14 @@ partial def runQuartz (o : Opts) (st : State) (fin fout : Quartz.Flags)
         stdout.putStrLn (Monitor.dropLine trimmed)
         stdout.flush
       runQuartz o st fin fout dev
-    | some (ev, injected) =>
-      let (fin', evs) := Quartz.decode fin injected ev
+    | some inc =>
+      let (fin', evs) := Quartz.decode fin inc.injected inc.event inc.time
       -- A line that decodes to nothing is the failure that hides: a keycode
       -- absent from the table produces no events and, without this, no output
       -- either.  Say so rather than looking dead.
       if o.monitor && evs.isEmpty then
         stdout.putStrLn (Monitor.dropLine trimmed)
-      let code := Monitor.codeOf ev
+      let code := Monitor.codeOf inc.event
       let mut st := st
       let mut fout := fout
       for iev in evs do
@@ -287,26 +287,27 @@ partial def runModal (o : Opts) (names : List String)
         stdout.putStrLn (Monitor.dropLine trimmed)
         stdout.flush
       runModal o names mk w fin fout dev
-    | some (ev, true) =>
+    | some inc =>
+      if inc.injected then
       -- Our own event on its way back to the application, handed straight on
       -- exactly as `prelude` does.  The guard is here rather than below the
       -- loop because `Edge` has no `injected` field yet; once it has one, this
       -- branch should go and `prelude`'s `no_feedback` should do the work.
-      stdout.putStrLn ev.line
+      stdout.putStrLn inc.event.line
       stdout.flush
-      runModal o names mk w (Dispatch.Wire.level ev) fout dev
-    | some (ev, false) =>
-      let (fin', eds) := Dispatch.Wire.edges fin ev
+      runModal o names mk w (Dispatch.Wire.level inc.event) fout dev
+      else
+      let (fin', eds) := Dispatch.Wire.edges fin inc.event
       -- A line that names no position is the failure that hides, same as in
       -- `runQuartz`: say so rather than looking dead.
       if o.monitor && eds.isEmpty then
         stdout.putStrLn (Monitor.dropLine trimmed)
-      let code := Monitor.codeOf ev
+      let code := Monitor.codeOf inc.event
       let back := mk o.cfg
       let mut w := w
       let mut fout := fout
       for (dir, c) in eds do
-        let (w', eff) := Dispatch.dispatch back w dir c
+        let (w', eff) := Dispatch.dispatch back w dir c inc.time
         let (fout', out) := Dispatch.Wire.many names fout eff
         if o.monitor then
           stdout.putStrLn (Dispatch.Wire.Row.line

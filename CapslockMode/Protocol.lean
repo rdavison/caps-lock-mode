@@ -126,13 +126,39 @@ inductive Line where
   | ignore
   deriving Repr, Inhabited
 
+/-- A `@1234` stamp, if this word is one.
+
+A **tagged** token rather than another positional field, and both wire parsers
+match exact arities -- `Monitor.lean` settled this once already for the `dev`
+line: "a fourth field would make every event unparseable".  The precedent that
+does work is `injected`, a tag filtered out of the word list before the arity
+match, so a stamp is filtered out the same way and may sit anywhere on the line.
+`@` cannot begin a direction, a keycode, a key name or a flag name, so the token
+set stays unambiguous. -/
+def stamp? (w : String) : Option Nat :=
+  if w.startsWith "@" then parseNat? (w.drop 1).toString else none
+
+/-- Split a line into its untagged words, the `injected` tag, and the stamp.
+
+`none` when a word *looks* like a stamp and is not -- `@x`, or two of them.  A
+driver whose clock has broken must look broken; reading it as a silent zero
+would turn every tap-hold into a tap and leave nothing to find. -/
+def tags? (s : String) : Option (List String × Bool × Nat) :=
+  let ws := (s.trim.splitOn " ").filter (fun w => !w.isEmpty)
+  let stamps := ws.filterMap stamp?
+  if ws.any (·.startsWith "@") && stamps.length != 1 then none
+  else some (ws.filter (fun w => w != "injected" && !w.startsWith "@"),
+             ws.contains "injected", stamps.headD 0)
+
 def parseLine? (s : String) : Option Line :=
   let s := s.trim
   if s.isEmpty || s.toList.head? == some '#' then some .ignore
   else if s == "?" then some .query
   else if s == "reset" then some .reset
-  else
-    match s.splitOn " " |>.filter (fun w => !w.isEmpty) with
+  else match tags? s with
+  | none => none
+  | some (ws, _, time) =>
+    match ws with
     | [d, k] | [d, k, _] =>
       let dir? : Option Dir :=
         match d with
@@ -140,11 +166,11 @@ def parseLine? (s : String) : Option Line :=
         | "up" | "u" | "release" => some .up
         | _ => none
       let mods? : Option Mods :=
-        match s.splitOn " " |>.filter (fun w => !w.isEmpty) with
+        match ws with
         | [_, _, m] => parseMods? m
         | _ => some {}
       match dir?, parsePhysKey? k, mods? with
-      | some dir, some key, some mods => some (.event { dir, key, mods })
+      | some dir, some key, some mods => some (.event { dir, key, mods, time })
       | _, _, _ => none
     | _ => none
 
@@ -262,28 +288,43 @@ def Event.line : Event → String
   | .text dir ch f => s!"text {dir.name} {charCode ch} {Flags.names f}"
   | .flagsChanged f => s!"flags {Flags.names f}"
 
-/-- One line from a tap.  The optional trailing `injected` marks an event the
-tap recognised as our own. -/
-def parseLine? (s : String) : Option (Event × Bool) :=
-  let ws := (s.trim.splitOn " ").filter (fun w => !w.isEmpty)
-  let injected := ws.contains "injected"
-  let ws := ws.filter (fun w => w != "injected")
+/-- One line from a tap: the event, whether the tap recognised it as ours, and
+when it happened.
+
+A record and not a nested tuple, because `r.2.2` cannot say which of two facts
+it is -- the argument `Machine.Pre` makes about its own constructors. -/
+structure Incoming where
+  event : Event
+  injected : Bool := false
+  /-- Milliseconds on the driver's monotonic clock; `0` for an unstamped wire,
+  which is "no time has passed" rather than "the epoch". -/
+  time : Nat := 0
+  deriving DecidableEq, Repr, Inhabited
+
+/-- One line from a tap.  The `injected` tag marks an event the tap recognised
+as our own and a `@1234` tag carries the clock; both may sit anywhere on the
+line, and a line with neither reads exactly as it did before either existed. -/
+def parseLine? (s : String) : Option Incoming :=
   let dir? : String → Option Dir := fun w =>
     match w with
     | "down" | "d" | "press" => some .down
     | "up" | "u" | "release" => some .up
     | _ => none
-  match ws with
-  | ["flags", f] => (parseFlags? f).map (fun f => (.flagsChanged f, injected))
-  | [d, code] =>
-    match dir? d, parseNat? code with
-    | some dir, some c => some (.key dir (UInt16.ofNat c) {}, injected)
-    | _, _ => none
-  | [d, code, f] =>
-    match dir? d, parseNat? code, parseFlags? f with
-    | some dir, some c, some fl => some (.key dir (UInt16.ofNat c) fl, injected)
-    | _, _, _ => none
-  | _ => none
+  match tags? s with
+  | none => none
+  | some (ws, injected, time) =>
+    match ws with
+    | ["flags", f] => (parseFlags? f).map fun f => { event := .flagsChanged f, injected, time }
+    | [d, code] =>
+      match dir? d, parseNat? code with
+      | some dir, some c => some { event := .key dir (UInt16.ofNat c) {}, injected, time }
+      | _, _ => none
+    | [d, code, f] =>
+      match dir? d, parseNat? code, parseFlags? f with
+      | some dir, some c, some fl =>
+        some { event := .key dir (UInt16.ofNat c) fl, injected, time }
+      | _, _, _ => none
+    | _ => none
 
 end Quartz
 

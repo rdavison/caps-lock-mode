@@ -112,6 +112,19 @@ structure InputEvent where
   (macOS event taps, Windows low-level hooks) show a filter its own synthetic
   events, and re-interpreting them would feed the machine its own output. -/
   injected : Bool := false
+  /-- When the driver says this happened: milliseconds on a monotonic clock
+  whose origin is the driver's own start.
+
+  `0` is "unknown", which is what an unstamped wire gives for every event -- and
+  since every reader of this field computes a *difference*, an unknown origin
+  reads as "no time has passed".  That is why it is a defaulted `Nat` and not an
+  `Option`: the degradation is toward the quiet answer, so a driver that does
+  not stamp behaves exactly as this project did before clocks existed.
+
+  Milliseconds because that is the unit a kanata config writes its timeouts in
+  (`(tap-hold 200 200 ...)`); carrying nanoseconds would put a conversion at
+  every comparison and make a reader ask, each time, which side was scaled. -/
+  time : Nat := 0
   deriving DecidableEq, Repr, Inhabited
 
 /-- An event CapslockMode hands back to the system. -/

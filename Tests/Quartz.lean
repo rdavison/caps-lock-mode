@@ -94,7 +94,41 @@ private def emittedMac (script : String) : String :=
 #guard Quartz.parseFlags? "-" == some ({} : Flags)
 #guard (Quartz.parseLine? "down 4 command").isSome
 #guard (Quartz.parseLine? "flags -").isSome
-#guard (Quartz.parseLine? "down 4 command injected").map (fun p => p.2) == some true
+#guard (Quartz.parseLine? "down 4 command injected").map (·.injected) == some true
+
+/-! ## The clock rides as a tag, not as a field
+
+Both wire parsers match exact arities, so a fourth positional field would make
+every event unparseable -- `Monitor.lean` settled that once already for the
+`dev` line.  A stamp is tagged, like `injected`, and filtered out before the
+arity match, which is what lets it sit anywhere and lets a line with no stamp
+parse to exactly what it always did. -/
+
+-- The canary for the md5 check, in the one form a `#guard` can state it.
+#guard (Quartz.parseLine? "down 4 command").map (·.event)
+     == (Quartz.parseLine? "down 4 command @99").map (·.event)
+#guard (Quartz.parseLine? "down 4 command").map (·.time) == some 0
+
+-- Every arity carries it.
+#guard (Quartz.parseLine? "down 4 command @1234").map (·.time) == some 1234
+#guard (Quartz.parseLine? "down 4 @7").map (·.time) == some 7
+#guard (Quartz.parseLine? "flags shift @12").map (·.time) == some 12
+
+-- Two tags, so they commute.
+#guard (Quartz.parseLine? "down 4 command injected @7").map (fun i => (i.injected, i.time))
+     == some (true, 7)
+#guard (Quartz.parseLine? "down 4 command @7 injected").map (fun i => (i.injected, i.time))
+     == some (true, 7)
+
+-- A word that looks like a stamp and is not drops the line.  A driver whose
+-- clock has broken must look broken: read as a silent zero it would turn every
+-- tap-hold into a tap and leave nothing to find.
+#guard (Quartz.parseLine? "down 4 @x").isNone
+#guard (Quartz.parseLine? "down 4 @1 @2").isNone
+
+-- Output is never stamped: the machine does not re-read what it wrote, and an
+-- injectable line growing a fourth token is what would break `inject`.
+#guard (Event.key .down 123 { shift := true }).line == "key down 123 shift"
 #guard (Event.key .down 123 { shift := true }).line == "key down 123 shift"
 
 /-! ## A `text` payload is a scalar, not a character

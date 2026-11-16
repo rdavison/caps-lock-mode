@@ -298,28 +298,38 @@ def applyShift (k : Key) (shift : Bool) : Key :=
   | .char ch, true => .char (shiftChar ch)
   | _, _ => k
 
-/-- The modifier transitions between two masks, as the machine's own events. -/
-def diff (old new : Flags) : List InputEvent :=
+/-- The modifier transitions between two masks, as the machine's own events.
+
+`time` is the stamp of the event that reported the new mask, because that is
+when these transitions were observed -- macOS does not say when each modifier
+moved, only what the level is now.  Defaulted, so an unstamped wire is the
+all-zero case and every existing caller keeps its meaning. -/
+def diff (old new : Flags) (time : Nat := 0) : List InputEvent :=
   [Modifier.ctrl, Modifier.alt, Modifier.shift, Modifier.super].filterMap fun m =>
     if old.get m == new.get m then none
-    else some { dir := if new.get m then .down else .up, key := .mod m, mods := modsOf new }
+    else some { dir := if new.get m then .down else .up, key := .mod m
+                mods := modsOf new, time := time }
 
 /-- One incoming tap event becomes the new flag state plus the events the
 machine should see.  Modifier *transitions* are recovered by diffing, which is
 the level-to-edge conversion macOS forces on every client. -/
-def decode (f : Flags) (injected : Bool) : Event → Flags × List InputEvent
-  | .flagsChanged f' => (f', diff f f')
+def decode (f : Flags) (injected : Bool) (ev : Event) (time : Nat := 0) :
+    Flags × List InputEvent :=
+  match ev with
+  | .flagsChanged f' => (f', diff f f' time)
   | .key dir c f' =>
-    let pre := diff f f'
+    let pre := diff f f' time
     match physOf? c with
     | some (.key k) =>
       (f', pre ++ [{ dir := dir, key := .key (applyShift k f'.shift), mods := modsOf f'
-                     injected := injected }])
-    | some pk => (f', pre ++ [{ dir := dir, key := pk, mods := modsOf f', injected := injected }])
+                     injected := injected, time := time }])
+    | some pk => (f', pre ++ [{ dir := dir, key := pk, mods := modsOf f'
+                                injected := injected, time := time }])
     | none => (f', pre)
   | .text dir ch f' =>
-    (f', diff f f' ++
-      [{ dir := dir, key := .key (.char ch), mods := modsOf f', injected := injected }])
+    (f', diff f f' time ++
+      [{ dir := dir, key := .key (.char ch), mods := modsOf f'
+         injected := injected, time := time }])
 
 /-! ## Theorems -/
 

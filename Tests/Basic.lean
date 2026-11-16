@@ -134,6 +134,18 @@ private def allScripts : List String :=
   | _ => false) == some true
 #guard (parseLine? "# a comment").isSome
 #guard (parseLine? "sideways q").isNone
+
+-- The clock is a tag on this wire too, so the two parsers cannot drift in what
+-- a stamped line means.  Nothing on the raw wire reads it yet -- there is no
+-- kanata backend here -- but a line that carried one and was dropped would be a
+-- surprise waiting for the day there is.
+#guard (parseLine? "down a @1234").map (fun l => match l with
+  | .event ev => ev.time == 1234 && ev.key == PhysKey.key (.char 'a')
+  | _ => false) == some true
+#guard (parseLine? "down a").map (fun l => match l with
+  | .event ev => ev.time == 0
+  | _ => false) == some true
+#guard (parseLine? "down a @x").isNone
 #guard (OutputEvent.down (.key .home)).line == "down home"
 #guard (OutputEvent.up (.mod .ctrl)).line == "up ctrl"
 #guard Chord.name { mods := { ctrl := true, shift := true }, key := .right } == "ctrl+shift+right"
