@@ -55,6 +55,9 @@ OPTIONS:
   --toggle <key>      key that switches modes (default: caps); a name, a bare
                       keycode of 2+ digits, or code:<n> for any keycode
   --max-count <n>     largest accepted count prefix (default: 100)
+  --toggle-hold <ms>  hold the toggle key longer than this and it is not a mode
+                      switch but an ordinary position, which a loaded config may
+                      bind (default: off; 200 when --kanata is given)
   --start-normal      start in normal mode instead of insert
   --no-esc            do not let Esc return to normal mode from insert
   --text <string>     buffer contents for demo/trace
@@ -94,6 +97,12 @@ partial def parseOpts (args : List String) (o : Opts) : Except String (Opts × L
     match parseToggle? k with
     | some pk => parseOpts rest { o with cfg := { o.cfg with toggleKey := pk } }
     | none => .error s!"unknown key: {k}"
+  | "--toggle-hold" :: n :: rest =>
+    if n.all Char.isDigit && !n.isEmpty then
+      parseOpts rest { o with cfg := { o.cfg with toggleHold := some n.toNat! } }
+    else .error s!"not a number: {n}"
+  | "--toggle-hold-off" :: rest =>
+    parseOpts rest { o with cfg := { o.cfg with toggleHold := none } }
   | "--max-count" :: n :: rest =>
     if n.all Char.isDigit && !n.isEmpty then
       parseOpts rest { o with cfg := { o.cfg with maxCount := n.toNat! } }
@@ -475,6 +484,19 @@ def main (args : List String) : IO UInt32 := do
           IO.println (Monitor.stateLine o.cfg.start)
         match kan with
         | some ⟨_, kcfg⟩ =>
+          -- The mode key gets its second reading by default, but only when the
+          -- loaded config actually binds that position: the reading exists so a
+          -- binding can be reached, and where there is none, a held mode key
+          -- would fall through `defsrc` and reach the system as a real Caps
+          -- Lock -- the hardware light, not a layer.  `--toggle-hold <ms>` and
+          -- `--toggle-hold-off` both override this.
+          let binds := kcfg.src.toList.any fun c =>
+            Kanata.Code.toPhys? c == some o.cfg.toggleKey
+          let o := if o.cfg.toggleHold.isSome || !binds then o
+                   else { o with cfg := { o.cfg with toggleHold := some 200 } }
+          if o.cfg.toggleHold.isSome then
+            IO.eprintln s!"# kanata: {o.cfg.toggleKey.name} tapped switches mode, \
+held is whatever the config binds it to"
           -- `Kanata.Sized` is a sigma, but `modal`'s result type does not
           -- mention the width -- so destructuring here erases it and `runModal`
           -- is an ordinary non-dependent loop.

@@ -110,6 +110,12 @@ structure State where
   forwarded too, even if the mode changed in between — otherwise the
   application is left believing a key is still held. -/
   down : List PhysKey := []
+  /-- When the mode key went down, while its reading is still open.
+
+  Only `Config.toggleHold` ever sets this, and only `Dispatch.guarded` reads it:
+  `prelude` and `step` do not know it exists, which is what keeps the mode key's
+  one-reading behaviour -- and every theorem about it -- exactly as it was. -/
+  toggleAt : Option Nat := none
   deriving DecidableEq, Repr, Inhabited
 
 namespace State
@@ -168,6 +174,21 @@ structure Config where
   the system with synthetic events.  Proved to be respected in
   `CapslockMode.Invariants`. -/
   maxCount : Nat := 100
+  /-- How long the mode key may be held before it stops being a mode toggle.
+
+  `none` is the mode key as this project has always had it: the prelude's,
+  pressed or held, never reaching a backend, and never typing anything.  `some
+  ms` gives it a second reading -- the press goes to the bound backend like any
+  other position, and a release inside `ms` *also* moves the mode.
+
+  A `Nat` and not a second `PhysKey`, because the two readings are of one key.
+  An `Option` and not `0`, because "no hold reading" and "a hold reading with a
+  zero timeout" are different things and `0` would quietly mean the second.
+
+  Read only by `Dispatch.guarded`, which is the layer that has a backend to
+  hand the press to.  `prelude` and `step` never see it, so `step_def` and every
+  guard theorem in `CapslockMode.Invariants` keep their statements. -/
+  toggleHold : Option Nat := none
   deriving DecidableEq, Repr, Inhabited
 
 namespace Config

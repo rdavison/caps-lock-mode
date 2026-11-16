@@ -177,6 +177,46 @@ dispatcher is where the clock actually arrives -- `Edge.time`, off the wire. -/
 -- through `go` are a tap.
 #guard codes (go realBack realW [(.down, at? 13), (.up, at? 13)]) == "down grv up grv"
 
+/-! ### The mode key, with a hold reading
+
+`Config.toggleHold` gives Caps Lock a second reading: tapped it still moves the
+mode, held it is an ordinary position and the config decides what it means.  In
+this fixture position 41 is `caps` and layer 0 binds it to `@ctl`, which is
+`(multi lctl (layer-while-held cmd-qwerty))` -- Ctrl, plus a layer that puts the
+shortcuts back on their QWERTY positions.
+
+The press is dispatched eagerly and the *release* decides, which is why holding
+and then typing needs no retroactive machinery: the layer is already pushed by
+the time the next key resolves. -/
+
+private def TH : Config := { toggleHold := some 200 }
+private def thBack : Step (State × Kanata.St) := modal TH [.insert] real
+
+-- Tapped: the mode moves, exactly as it does with no hold reading at all.
+#guard (goAt thBack realW [(.down, .capsLock, 0), (.up, .capsLock, 80)]).1.backend.1.mode
+  == Mode.normal
+
+private def heldThenS : List (Dir × Kanata.Code × Nat) :=
+  [(.down, .capsLock, 0), (.down, at? 43, 300), (.up, at? 43, 310), (.up, .capsLock, 400)]
+
+-- Held: the mode does not move...
+#guard (goAt thBack realW heldThenS).1.backend.1.mode == Mode.insert
+
+-- ... and `cmd-qwerty` is live underneath it.  Position 43 is `s` in `defsrc`,
+-- `i` in layer 0 (aien) and `s` again in `cmd-qwerty`, so the emitted code is
+-- the discriminator between "the layer pushed" and "it did not".
+#guard codes (goAt thBack realW heldThenS) == "down lctl down s up s up lctl"
+
+-- Without the hold reading the same stream is the mode key and then vi: the
+-- `@ctl` binding is never reached, and position 43 types nothing in normal
+-- mode.
+#guard codes (goAt realBack realW heldThenS) == ""
+
+-- And with no config bound at all, Caps Lock still types nothing: the promise
+-- `Invariants.prelude_capsLock_silent` makes, which `toggleHold = none` is why
+-- this module did not have to weaken.
+#guard (dispatch realBack realW .down .capsLock).2 == [Effect.enter .normal]
+
 -- Position 18 is `5`, and layer 12 (`layers`) says `lrld`: timeless, and still
 -- refused, because it wants a file rather than a clock.
 #guard (dispatch realBack { backend := ({}, { base := 12 }) } .down (at? 18)).2

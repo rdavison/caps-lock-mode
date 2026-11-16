@@ -413,6 +413,55 @@ whether the mode moved. -/
   · rfl
   · simp [Effect.emitted]
 
+/-- The mode key's second reading, when `Config.toggleHold` gives it one.
+
+`none` means "this edge is not the mode key, or there is no hold reading", and
+then `guarded` below is literally the function it was -- which is why every
+theorem about it, and every config that leaves `toggleHold` unset, is unchanged
+by this existing.
+
+The shape is: **dispatch the press eagerly, decide on the release.**  The press
+goes to the bound backend at once, so a config that binds the mode key's
+position to `(multi lctl (layer-while-held ...))` presses Ctrl and pushes its
+layer immediately, and anything typed under it resolves on the pushed stack with
+no retroactive machinery at all.  The timing decision is then a single
+comparison when the key comes back up.
+
+The alternative -- defer the press and replay it if the hold wins -- founders on
+a vocabulary boundary: `prelude` deals in `InputEvent`, a `Step` takes an
+`Edge`, and rebuilding the mode key's `Edge` needs a total `PhysKey → Code` that
+`Machine` is not allowed to know about.
+
+**The cost, stated rather than hidden.**  A *tap* of the mode key is no longer
+silent: it emits whatever the backend does for the key's down and up.  Where the
+hold action is Ctrl that is observably harmless on macOS, because a lone Ctrl
+press is inert -- unlike Alt or Cmd.  It is harmless *for that binding* and not
+in general, and if the mode key's position is ever bound to something with a
+lone-press meaning, this stops being free. -/
+def toggleHold? (cfg : Config) (st : State) (e : Edge) : Option State :=
+  match cfg.toggleHold with
+  | none => none
+  | some ms =>
+    match Kanata.Code.toPhys? e.code with
+    | some pk =>
+      if pk == cfg.toggleKey then
+        match e.dir with
+        | .down => some { st with toggleAt := some e.time }
+        | .up =>
+          let tapped : Bool := match st.toggleAt with
+            | some t0 => decide (e.time - t0 < ms)
+            | none => false
+          some { (if tapped then st.toggleMode else st) with toggleAt := none }
+      else none
+    | none => none
+
+/-- With no hold reading, the mode key has only the prelude's -- so `guarded` is
+the function it was before `toggleHold` existed, and the theorems below are
+about that function. -/
+@[simp] theorem toggleHold?_of_none (cfg : Config) (st : State) (e : Edge)
+    (h : cfg.toggleHold = none) : toggleHold? cfg st e = none := by
+  simp [toggleHold?, h]
+
 /-- `prelude`, in front of any backend at all.
 
 This is what the guards were hoisted out of `step` for.  All three are about
@@ -440,6 +489,9 @@ Two details:
   resolves the event. -/
 def guarded {σ : Type} (cfg : Config) (back : Step (State × σ)) : Step (State × σ) :=
   fun s e =>
+    match toggleHold? cfg s.1 e with
+    | some st' => (back (st', s.2) e).map (announce s.1.mode)
+    | none =>
     match viEvent? e with
     | none => (back s e).map (announce s.1.mode)
     | some iev =>
@@ -499,10 +551,11 @@ The answer is read through `Effect.emitted` rather than compared whole, because
 a mode change adds an `enter` that `step` has no vocabulary for; the
 `OutputEvent`s are the part of the answer `step` is about. -/
 theorem viAlone_down (cfg : Config) (st : State) (e : Edge) (iev : InputEvent)
-    (hd : e.dir = .down) (hv : viEvent? e = some iev) :
+    (hd : e.dir = .down) (hv : viEvent? e = some iev)
+    (hth : cfg.toggleHold = none) :
     (viAlone cfg (st, ()) e).map (fun r => (r.1.1, Effect.emitted r.2))
       = some ((step cfg st iev).1, (step cfg st iev).2) := by
-  simp only [viAlone, guarded, hv]
+  simp only [viAlone, guarded, hv, toggleHold?_of_none cfg st e hth]
   match hpre : prelude cfg st iev with
   | .handled st' out =>
     rw [step_of_handled hpre, hd]
@@ -613,12 +666,13 @@ shape needed: there is nothing to agree *with*. -/
 theorem modal_bound (cfg : Config) (bound : Bound) (kcfg : Kanata.Cfg n) (st : State)
     (kan : Kanata.St) (e : Edge) (t : Kanata.St) (eff : List Effect)
     (hm : st.mode ∈ bound) (hv : viEvent? e = none)
+    (hth : cfg.toggleHold = none)
     (h : kanata kcfg kan e = some (t, eff)) :
     modal cfg bound kcfg (st, kan) e = some ((st, t), eff) := by
   have hf : (!bound.contains st.mode) = false := by simp [hm]
   have hsel := select_second (fun (s : State) (_ : Kanata.St) => !bound.contains s.mode)
     (vi cfg) (kanata kcfg) (st, kan) e t eff hf h
-  simp only [modal, guarded, hv]
+  simp only [modal, guarded, hv, toggleHold?_of_none cfg st e hth]
   rw [hsel]
   simp [announce]
 
