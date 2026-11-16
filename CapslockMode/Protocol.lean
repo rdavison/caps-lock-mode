@@ -222,7 +222,7 @@ keycodes travel on the wire, the driver needs no key table of its own:
     flags shift,command     a kCGEventFlagsChanged carrying a new mask
     dev 45 0                which device the following events came from
     key down 123 shift      inject Shift+Left
-    text down x             type the character `x` (no keycode on this layout)
+    text down 120 -         type U+0078 `x` (no keycode on this layout)
 -/
 
 namespace Quartz
@@ -244,10 +244,22 @@ def parseFlags? (s : String) : Option Flags :=
       | "command" | "cmd" | "super" | "meta" => some { f with command := true }
       | _ => none
 
+/-- A character as the wire spells it: its Unicode scalar, in decimal.
+
+Not the character itself.  A `text` line is whitespace-delimited and
+newline-framed, so a payload of `' '` would collapse the driver's split -- the
+flags field would be read as the character -- and a `'\n'` would destroy the
+line framing outright.  `Quartz.keyEvent`'s own unreachable branch emits
+exactly `.text dir ' ' f`, so this is not hypothetical.
+
+Decimal rather than an escape scheme because there is exactly one thing to
+encode and so no second escape to get wrong. -/
+def charCode (c : Char) : String := toString c.toNat
+
 /-- How CapslockMode spells an event it wants injected. -/
 def Event.line : Event → String
   | .key dir code f => s!"key {dir.name} {code} {Flags.names f}"
-  | .text dir ch f => s!"text {dir.name} {ch} {Flags.names f}"
+  | .text dir ch f => s!"text {dir.name} {charCode ch} {Flags.names f}"
   | .flagsChanged f => s!"flags {Flags.names f}"
 
 /-- One line from a tap.  The optional trailing `injected` marks an event the

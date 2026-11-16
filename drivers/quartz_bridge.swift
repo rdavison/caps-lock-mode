@@ -472,8 +472,13 @@ func inject(_ line: String) {
         event.setIntegerValueField(.eventSourceUserData, value: signature)
         event.post(tap: .cghidEventTap)
     case "text":
-        // a character with no virtual keycode on this layout: type it directly
-        guard let ch = parts[2].unicodeScalars.first,
+        // A character with no virtual keycode on this layout: type it directly.
+        //
+        // The payload is a Unicode scalar in decimal, not the character, because
+        // this line is split on spaces and framed by newlines -- a raw ' ' would
+        // shift every field left and a raw '\n' would end the line early.
+        // `Quartz.charCode` is the matching half on the Lean side.
+        guard let v = UInt32(parts[2]), let ch = Unicode.Scalar(v),
               let event = CGEvent(keyboardEventSource: eventSource,
                                   virtualKey: 0, keyDown: down) else { return }
         var utf16 = Array(String(Character(ch)).utf16)

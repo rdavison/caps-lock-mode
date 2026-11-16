@@ -97,4 +97,25 @@ private def emittedMac (script : String) : String :=
 #guard (Quartz.parseLine? "down 4 command injected").map (fun p => p.2) == some true
 #guard (Event.key .down 123 { shift := true }).line == "key down 123 shift"
 
+/-! ## A `text` payload is a scalar, not a character
+
+The driver splits an injectable line on spaces and reads the character out of
+field 2.  A raw `' '` would shift the flags into that field and type a `-`; a
+raw `'\n'` would end the line early and lose the rest.  `Quartz.keyEvent`'s own
+fallback emits exactly `.text dir ' ' f`, so neither is hypothetical. -/
+
+#guard Quartz.charCode 'x' == "120"
+#guard Quartz.charCode ' ' == "32"
+#guard Quartz.charCode '\n' == "10"
+#guard Quartz.charCode '🚆' == "128646"
+
+#guard (Event.text .down 'x' {}).line == "text down 120 -"
+#guard (Event.text .down ' ' {}).line == "text down 32 -"
+
+-- The property the driver actually depends on: four whitespace-free fields,
+-- whatever the payload.  A character is checked here rather than a line format,
+-- because it is the payload that varies.
+#guard [' ', '\n', '\t', 'é', '🚆'].all fun c =>
+         ((Event.text .down c { shift := true }).line.splitOn " ").length == 4
+
 end CapslockMode.Tests.Quartz
