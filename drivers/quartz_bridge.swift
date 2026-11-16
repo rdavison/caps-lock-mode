@@ -442,6 +442,32 @@ func parseFlags(_ s: String) -> CGEventFlags {
     return flags
 }
 
+// MARK: - The clock
+
+// A CGEvent carries a mach absolute timestamp.  What goes on the wire is
+// milliseconds since the first event we saw: the evaluator only ever subtracts
+// two of them, so the origin is free, and seven digits keep a log readable
+// where nineteen would not.  `Nat` on the Lean side is unbounded, so there is
+// no 49.7-day wrap to design around.
+//
+// `event.timestamp`, not `mach_absolute_time()` read here.  A tap callback has
+// a millisecond deadline it is allowed to miss, and the stamp on the event is
+// when the key actually moved; reading the clock in the callback would fold tap
+// latency into a hold decision.
+var timebase = mach_timebase_info_data_t()
+let timebaseOK = mach_timebase_info(&timebase) == KERN_SUCCESS
+var clockOrigin: UInt64 = 0
+
+func stampMs(_ t: CGEventTimestamp) -> UInt64 {
+    guard timebaseOK, timebase.denom != 0 else { return 0 }
+    let now = UInt64(t)
+    if clockOrigin == 0 { clockOrigin = now }
+    let delta = now >= clockOrigin ? now - clockOrigin : 0
+    // ticks -> ns -> ms.  Multiply first: on Apple Silicon the ratio is 125/3,
+    // so dividing first would round a 24 MHz tick to zero.
+    return delta &* UInt64(timebase.numer) / UInt64(timebase.denom) / 1_000_000
+}
+
 // MARK: - Injection
 
 // Our own events carry a signature, because a tap observes what it posts. The
@@ -543,11 +569,15 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
                      + "\(event.getIntegerValueField(.eventSourceUnixProcessID))")
         }
         let flags = flagNames(event.flags)
+        // The stamp is a tag, so it can ride at the end without disturbing the
+        // arities the Lean parser matches on.  Injectable lines stay unstamped:
+        // `inject` reads parts[0...3] and a fourth token there would break it.
+        let t = stampMs(event.timestamp)
         if type == .flagsChanged {
-            send("flags \(flags)")
+            send("flags \(flags) @\(t)")
         } else {
             let code = event.getIntegerValueField(.keyboardEventKeycode)
-            send("\(type == .keyDown ? "down" : "up") \(code) \(flags)")
+            send("\(type == .keyDown ? "down" : "up") \(code) \(flags) @\(t)")
         }
         // Everything is swallowed and replayed by the reader thread, which is
         // what keeps the callback off the pipe's round trip.
