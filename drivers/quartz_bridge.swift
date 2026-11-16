@@ -30,6 +30,14 @@ struct Options {
     var binary = "./capslockmode"
     var toggle = "f18"
     var remap = true
+    /// A kanata config for the machine to bind to insert mode.
+    ///
+    /// Setting this also turns the hidutil remap off and moves the toggle back
+    /// to Caps Lock, because a config binds the `caps` *position*: with the
+    /// remap on, the tap would report F18 and a `defsrc` that mentions `caps`
+    /// would never see it.
+    var kanata: String? = nil
+    var noKanata = false
     var dryRun = false
     var check = false
     var monitor = false
@@ -43,6 +51,8 @@ func parseArgs() -> Options {
         case "--binary": o.binary = it.next() ?? o.binary
         case "--toggle": o.toggle = it.next() ?? o.toggle
         case "--no-remap": o.remap = false
+        case "--kanata": o.kanata = it.next()
+        case "--no-kanata": o.noKanata = true
         case "--dry-run": o.dryRun = true
         case "--check": o.check = true
         case "--monitor", "--gui": o.monitor = true
@@ -53,6 +63,9 @@ func parseArgs() -> Options {
               --binary <path>   the capslockmode executable (or set CAPSLOCKMODE_BIN)
               --toggle <key>    key that switches modes (default: f18, see --no-remap)
               --no-remap        do not remap Caps Lock to F18 with hidutil
+              --kanata <file>   bind this kanata config to insert mode; implies
+                                --no-remap and --toggle caps
+              --no-kanata       do not look for ~/.config/kanata/kanata.kbd
               --dry-run         print what would be injected instead of injecting it
               --check           report Accessibility permission status and exit
               --monitor         open a window showing intercepted events (starts disarmed)
@@ -77,6 +90,26 @@ func parseArgs() -> Options {
     // monitor, so that is the sane default when nothing was asked for.
     if CommandLine.arguments.count == 1, Bundle.main.bundleIdentifier != nil {
         o.monitor = true
+    }
+
+    // Nothing was asked for and there is a config sitting where kanata keeps
+    // one: load it.  Safe to do unasked, because the monitor opens *disarmed*
+    // -- nothing is intercepted until Start -- and the banner the machine
+    // prints on stderr lands in the window's log, so what loaded is on screen
+    // before anything can act on it.  `--no-kanata` opts out.
+    if o.kanata == nil && !o.noKanata {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let guess = home.appendingPathComponent(".config/kanata/kanata.kbd").path
+        if FileManager.default.fileExists(atPath: guess) { o.kanata = guess }
+    }
+
+    // A config binds the `caps` position, so the remap that hides it behind F18
+    // has to go, and the toggle has to come back to Caps Lock.  Done here, and
+    // not left to the user, because the two settings disagreeing is silent: the
+    // layout simply would not apply to that one key.
+    if o.kanata != nil {
+        o.remap = false
+        if o.toggle == "f18" { o.toggle = "caps" }
     }
     return o
 }
@@ -353,6 +386,7 @@ let writeLock = NSLock()
 func startMachine() {
     machine.executableURL = URL(fileURLWithPath: opts.binary)
     machine.arguments = ["run", "--wire", "quartz", "--platform", "mac", "--toggle", currentToggle]
+    if let k = opts.kanata { machine.arguments?.append(contentsOf: ["--kanata", k]) }
     if opts.monitor { machine.arguments?.append("--monitor") }
     machine.standardInput = toMachine
     machine.standardOutput = fromMachine
