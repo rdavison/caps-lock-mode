@@ -4,10 +4,10 @@ Where CapslockMode is, what is actually verified, and what it costs to pick up.
 
 Branch `claude/capslockmode-vi-keyboard-fmlaeb`, open as
 [PR #1](https://github.com/rdavison/caps-lock-mode/pull/1), pushed and current
-as of 2026-11-16. Twenty-three commits on top of the initial one: the machine
+as of 2026-11-16. Twenty-five commits on top of the initial one: the machine
 and its proofs, the macOS backend, a CI fix, the GUI monitor, the HID backend,
 the kanata evaluator, the dispatcher, the .app wrapper that finally made the
-monitor launchable, and the seven that wired a real kanata config to the
+monitor launchable, and the nine that wired a real kanata config to the
 keyboard and gave the mode key a clock.
 
 ## What exists
@@ -463,7 +463,7 @@ mapping.
 ### The config runs
 
 `capslockmode run --wire quartz --kanata ~/.config/kanata/kanata.kbd` binds a
-real kanata config to insert mode and leaves normal and visual to vi. Seven
+real kanata config to insert mode and leaves normal and visual to vi. Nine
 commits, 2026-11-16.
 
 **What is on the wire.** A stamp is a **tagged `@1234` token**, not a fourth
